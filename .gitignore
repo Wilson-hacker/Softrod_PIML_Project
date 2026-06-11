@@ -1,0 +1,40 @@
+# ---------------------------------------------------
+# Project Specific (Data and Models)
+# ---------------------------------------------------
+# Ignore massive image datasets and CSVs
+plots/
+*.csv
+
+# Ignore saved PyTorch model weights
+*.pt
+*.pth
+*.ckpt
+
+# Ignore training logs (e.g., TensorBoard)
+runs/
+logs/
+
+# ---------------------------------------------------
+# Python & Environments
+# ---------------------------------------------------
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+.idea/
+
+# ---------------------------------------------------
+# OS Specific
+# ---------------------------------------------------
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
