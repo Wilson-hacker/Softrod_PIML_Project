@@ -7,7 +7,7 @@ class BaselineRBFKernel(gpytorch.kernels.Kernel):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.rbf = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+        self.rbf = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=3))
 
     def forward(self, x1, x2, diag=False, **params):
         return self.rbf(x1, x2, diag=diag, **params)

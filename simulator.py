@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.integrate import solve_ivp, cumulative_trapezoid
+from scipy.integrate import solve_ivp
 
 
 class SoftRodSimulator:
@@ -83,19 +83,18 @@ class SoftRodSimulator:
         p_data = sol.y[:self.N, :]
         q_data = sol.y[self.N:, :]
 
-        dp_dt_data = np.zeros_like(p_data)
-        dq_dt_data = np.zeros_like(q_data)
-        for i, t in enumerate(sol.t):
-            derivs = self.pde_rhs(t, sol.y[:, i])
-            dp_dt_data[:, i] = derivs[:self.N]
-            dq_dt_data[:, i] = derivs[self.N:]
+        dp_int = np.zeros_like(p_data)
+        dq_int = np.zeros_like(q_data)
 
-        dp_int = cumulative_trapezoid(dp_dt_data, dx=self.dz, axis=0, initial=0)
-        dq_int = cumulative_trapezoid(dq_dt_data, dx=self.dz, axis=0, initial=0)
-
+        # Bypass the unstable cumulative_trapezoid extraction.
+        # Instead, we directly query the exact analytical energy gradients
+        # to serve as pristine ground-truth targets for the GP.
         for i in range(len(sol.t)):
-            closest_idx = np.argmin(np.abs(q_data[:, i]))
-            dp_int[:, i] -= dp_int[closest_idx, i]
+            p = sol.y[:self.N, i]
+            q = sol.y[self.N:, i]
+
+            dq_int[:, i] = self.dEdp(p)
+            dp_int[:, i] = np.array([self.dEdq(q[j], j) for j in range(self.N)])
 
         return {
             'p': p_data, 'q': q_data,

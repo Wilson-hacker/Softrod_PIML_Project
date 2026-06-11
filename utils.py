@@ -18,11 +18,18 @@ def simulate_gp_phs(simulator, dEdp_model, dEdq_model):
         q = state[simulator.N:]
 
         # NEW: Include simulator.z in the evaluation tensor
-        X_torch = torch.tensor(np.stack([p, q, simulator.z], axis=1), dtype=torch.float32)
+        X_raw = torch.tensor(np.stack([p, q, simulator.z], axis=1), dtype=torch.float32)
+
+        # Normalize inputs before passing to GP
+        X_norm = (X_raw - dEdp_model.X_mean) / (dEdp_model.X_std + 1e-6)
 
         with torch.no_grad():
-            grad_H_p = dEdp_model(X_torch).mean.numpy()
-            grad_H_q = dEdq_model(X_torch).mean.numpy()
+            pred_p_norm = dEdp_model(X_norm).mean.numpy()
+            pred_q_norm = dEdq_model(X_norm).mean.numpy()
+
+        # Un-normalize outputs back into physical parameter scales
+        grad_H_p = pred_p_norm * dEdp_model.y_std.numpy() + dEdp_model.y_mean.numpy()
+        grad_H_q = pred_q_norm * dEdq_model.y_std.numpy() + dEdq_model.y_mean.numpy()
 
         return simulator.evaluate_ph_dynamics(p, q, grad_H_p, grad_H_q, t)
 
@@ -49,14 +56,19 @@ def plot_comparison(data, dEdp_model, dEdq_model, simulator, save_path="gpphs_re
     real_dEdq = np.array([simulator.dEdq(q, mid_z_idx) for q in q_test_flat])
 
     # NEW: Include z_test_flat in the test tensor
-    X_test = torch.tensor(np.stack([p_test_flat, q_test_flat, z_test_flat], axis=1), dtype=torch.float32)
+    X_test_raw = torch.tensor(np.stack([p_test_flat, q_test_flat, z_test_flat], axis=1), dtype=torch.float32)
+
+    X_test_norm = (X_test_raw - dEdp_model.X_mean) / (dEdp_model.X_std + 1e-6)
 
     dEdp_model.eval()
     dEdq_model.eval()
 
     with torch.no_grad():
-        pred_dEdp = dEdp_model(X_test).mean.numpy()
-        pred_dEdq = dEdq_model(X_test).mean.numpy()
+        pred_dEdp_norm = dEdp_model(X_test_norm).mean.numpy()
+        pred_dEdq_norm = dEdq_model(X_test_norm).mean.numpy()
+
+    pred_dEdp = pred_dEdp_norm * dEdp_model.y_std.numpy() + dEdp_model.y_mean.numpy()
+    pred_dEdq = pred_dEdq_norm * dEdq_model.y_std.numpy() + dEdq_model.y_mean.numpy()
 
     fig = plt.figure(figsize=(16, 7))
 

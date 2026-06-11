@@ -1,0 +1,8 @@
+# Numerical computation and visualization
+numpy
+scipy
+matplotlib
+
+# GP-PHS Pipeline
+torch
+gpytorch
