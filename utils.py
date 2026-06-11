@@ -18,7 +18,7 @@ def simulate_gp_phs(simulator, dEdp_model, dEdq_model):
         q = state[simulator.N:]
 
         # NEW: Include simulator.z in the evaluation tensor
-        X_raw = torch.tensor(np.stack([p, q, simulator.z], axis=1), dtype=torch.float32)
+        X_raw = torch.tensor(np.stack([p, q, simulator.z], axis=1), dtype=torch.float64)
 
         # Normalize inputs before passing to GP
         X_norm = (X_raw - dEdp_model.X_mean) / (dEdp_model.X_std + 1e-6)
@@ -56,7 +56,7 @@ def plot_comparison(data, dEdp_model, dEdq_model, simulator, save_path="gpphs_re
     real_dEdq = np.array([simulator.dEdq(q, mid_z_idx) for q in q_test_flat])
 
     # NEW: Include z_test_flat in the test tensor
-    X_test_raw = torch.tensor(np.stack([p_test_flat, q_test_flat, z_test_flat], axis=1), dtype=torch.float32)
+    X_test_raw = torch.tensor(np.stack([p_test_flat, q_test_flat, z_test_flat], axis=1), dtype=torch.float64)
 
     X_test_norm = (X_test_raw - dEdp_model.X_mean) / (dEdp_model.X_std + 1e-6)
 

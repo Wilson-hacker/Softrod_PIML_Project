@@ -17,21 +17,21 @@ def run_pipeline():
 
     p_flat = data['p'].flatten()
     q_flat = data['q'].flatten()
-    dp_int_flat = data['dp_int'].flatten()
-    dq_int_flat = data['dq_int'].flatten()
+    dH_dq_target = data['dH_dq'].flatten()
+    dH_dp_target = data['dH_dp'].flatten()
 
-    # NEW: Tile the spatial array to match the time dimension, then flatten
+    # Tile the spatial array to match the time dimension, then flatten
     N_pts, T_steps = data['q'].shape
     z_tiled = np.tile(data['z'].reshape(N_pts, 1), (1, T_steps))
     z_flat = z_tiled.flatten()
 
-    # NEW: X matrix is now shape [N_total, 3] -> (p, q, z)
+    # X matrix is now shape [N_total, 3] -> (p, q, z)
     X = np.stack([p_flat, q_flat, z_flat], axis=1)
 
     downscale_factor = 10
-    X_train = torch.tensor(X[::downscale_factor], dtype=torch.float32)
-    y_dEdp_train = torch.tensor(dq_int_flat[::downscale_factor], dtype=torch.float32)
-    y_dEdq_train = torch.tensor(dp_int_flat[::downscale_factor], dtype=torch.float32)
+    X_train = torch.tensor(X[::downscale_factor], dtype=torch.float64)
+    y_dEdp_train = torch.tensor(dH_dp_target[::downscale_factor], dtype=torch.float64)
+    y_dEdq_train = torch.tensor(dH_dq_target[::downscale_factor], dtype=torch.float64)
 
     print(f"Data Generation Complete. GP Input Shape: {X_train.shape}")
 

@@ -14,7 +14,7 @@ class SoftRodSimulator:
 
         # Geometry: varying stiffness k(z) for "thin hinges"
         hinge_freq = num_hinges * np.pi / L
-        self.stiffness = 100.0 + 4.0 * np.cos(2 * hinge_freq * self.z)
+        self.stiffness = 10.0 + 4.0 * np.cos(2 * hinge_freq * self.z)
 
     def dEdq(self, q, z_idx):
         """Derivative of strain energy w.r.t strain"""
@@ -32,10 +32,9 @@ class SoftRodSimulator:
         pulsing energy into the system over time.
         """
         # Example: A motor at the middle of the rod that pulses periodically
-        # motor_location = np.exp(-10.0 * (z - self.L / 2) ** 2)
-        # motor_pulse = np.sin(2 * np.pi * t)
-        # return motor_location * motor_pulse
-        return 0.0
+        motor_location = np.exp(-10.0 * (z - self.L / 2) ** 2)
+        motor_pulse = np.sin(2 * np.pi * t)
+        return motor_location * motor_pulse
 
     def evaluate_ph_dynamics(self, p, q, grad_H_p, grad_H_q, t):
         """
@@ -83,8 +82,8 @@ class SoftRodSimulator:
         p_data = sol.y[:self.N, :]
         q_data = sol.y[self.N:, :]
 
-        dp_int = np.zeros_like(p_data)
-        dq_int = np.zeros_like(q_data)
+        grad_H_p = np.zeros_like(p_data)
+        grad_H_q = np.zeros_like(q_data)
 
         # Bypass the unstable cumulative_trapezoid extraction.
         # Instead, we directly query the exact analytical energy gradients
@@ -93,11 +92,11 @@ class SoftRodSimulator:
             p = sol.y[:self.N, i]
             q = sol.y[self.N:, i]
 
-            dq_int[:, i] = self.dEdp(p)
-            dp_int[:, i] = np.array([self.dEdq(q[j], j) for j in range(self.N)])
+            grad_H_p[:, i] = self.dEdp(p)
+            grad_H_q[:, i] = np.array([self.dEdq(q[j], j) for j in range(self.N)])
 
         return {
             'p': p_data, 'q': q_data,
-            'dp_int': dp_int, 'dq_int': dq_int,
+            'dH_dp': grad_H_p, 'dH_dq': grad_H_q,
             't': sol.t, 'z': self.z
         }
