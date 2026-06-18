@@ -10,7 +10,7 @@ from model import train_gp_model
 from utils import plot_comparison, simulate_gp_phs, plot_time_slices
 
 
-def run_pipeline():
+def run_pipeline(tag_str, kernel_type="baseline", hybird=False, n_freqs=10):
     print("\n--- Step 1: Solving Soft Robot PDE via Numerical Integrators ---")
     sim = SoftRodSimulator(L=10.0, N=60, T=5.5, dt=0.05, num_hinges=4)
     data = sim.generate_dataset()
@@ -47,7 +47,7 @@ def run_pipeline():
 
     print("\n--- Step 2: Training GP-PHS Component Models ---")
     dEdp_model, dEdp_lh = train_gp_model(X_train_norm, y_p_train_norm, kernel_type="baseline", training_iter=1000, patience=15)
-    dEdq_model, dEdq_lh = train_gp_model(X_train_norm, y_q_train_norm, kernel_type="baseline", training_iter=1000, patience=15)
+    dEdq_model, dEdq_lh = train_gp_model(X_train_norm, y_q_train_norm, kernel_type=kernel_type, hybird=hybird, n_freqs=n_freqs, training_iter=1000, patience=15)
 
     # Store normalization stats directly on the models for easy access in utils.py
     dEdp_model.X_mean, dEdp_model.X_std = X_mean, X_std
@@ -56,13 +56,13 @@ def run_pipeline():
     dEdq_model.y_mean, dEdq_model.y_std = y_q_mean, y_q_std
 
     print("\n--- Step 3: Projecting and Evaluating System Approximations ---")
-    plot_comparison(data, dEdp_model, dEdq_model, sim, save_path="./plots/gpphs_comparison.png")
+    plot_comparison(data, dEdp_model, dEdq_model, sim, save_path=f"./plots/H_landscape_{tag_str}.png")
 
     print("\n--- Step 4: Running Dynamic Rollout and Time-Slice Comparisons ---")
     p_gp, q_gp = simulate_gp_phs(sim, dEdp_model, dEdq_model)
-    plot_time_slices(data, q_gp, sim, time_slices=[0, 50, 100], save_path="./plots/gpphs_string_slices.png")
+    plot_time_slices(data, q_gp, sim, time_slices=[0, 50, 100], save_path=f"./plots/string_slices_{tag_str}.png", legend_tag=tag_str)
     print("Pipeline execution completed successfully.\n")
 
 
 if __name__ == '__main__':
-    run_pipeline()
+    run_pipeline("SD", kernel_type="SD")

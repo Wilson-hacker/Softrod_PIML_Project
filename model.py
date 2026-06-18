@@ -9,16 +9,22 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
     You will instantiate two of these: one for dE/dp, one for dE/dq.
     """
 
-    def __init__(self, train_x, train_y, likelihood, kernel_type="baseline"):
+    def __init__(self, train_x, train_y, likelihood, kernel_type="baseline", hybird=False, n_freqs=10):
         super(EnergyGradientGP, self).__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ZeroMean()  # Physics prior: assume 0 energy gradient initially
 
         if kernel_type == "baseline":
             from kernels import BaselineRBFKernel
             self.covar_module = BaselineRBFKernel()
-        elif kernel_type == "hinge_aware":
-            from kernels import HingeAwareStateKernel
-            self.covar_module = HingeAwareStateKernel()
+        elif kernel_type == "SD":
+            from kernels import StructuralDecoupledKernel
+            if hybird:
+                self.covar_module = StructuralDecoupledKernel(spatial_kernel_type="gibbs", n_freqs=n_freqs)
+            else:
+                self.covar_module = StructuralDecoupledKernel()
+        elif kernel_type == "gibbs":
+            from kernels import GibbsStateKernel
+            self.covar_module = GibbsStateKernel(n_freqs=n_freqs)
         else:
             raise ValueError("Unknown kernel type")
 
@@ -28,7 +34,7 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
 
-def train_gp_model(train_x, train_y, kernel_type="baseline", training_iter=1000, patience=5, min_delta=1e-3):
+def train_gp_model(train_x, train_y, kernel_type="baseline", hybird=False, n_freqs=10, training_iter=1000, patience=5, min_delta=1e-3):
     """
     Handles the PyTorch optimization loop for the GP with an embedded early-stopping mechanism.
 
@@ -41,7 +47,7 @@ def train_gp_model(train_x, train_y, kernel_type="baseline", training_iter=1000,
         min_delta: Minimum reduction in loss to qualify as an improvement
     """
     likelihood = gpytorch.likelihoods.GaussianLikelihood()
-    model = EnergyGradientGP(train_x, train_y, likelihood, kernel_type)
+    model = EnergyGradientGP(train_x, train_y, likelihood, kernel_type, hybird=hybird, n_freqs=n_freqs)
 
     # Enable training mode
     model.train()
@@ -71,7 +77,7 @@ def train_gp_model(train_x, train_y, kernel_type="baseline", training_iter=1000,
         current_loss = loss.item()
 
         # Print status updates every 10 iterations
-        if (i + 1) % 10 == 0:
+        if (i + 1) % 20 == 0:
             print(f'Iter {i + 1}/{training_iter} - Loss: {current_loss:.3f}')
 
         # --- Early Stopping Logic ---

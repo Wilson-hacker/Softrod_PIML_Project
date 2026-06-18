@@ -39,7 +39,8 @@ def simulate_gp_phs(simulator, dEdp_model, dEdq_model):
     return sol.y[:simulator.N, :], sol.y[simulator.N:, :]
 
 
-def plot_comparison(data, dEdp_model, dEdq_model, simulator, save_path="gpphs_results.png"):
+def plot_comparison(data, dEdp_model, dEdq_model,
+                    simulator, save_path="gpphs_results.png", legend_tag="baseline"):
     p_min, p_max = np.min(data['p']), np.max(data['p'])
     q_min, q_max = np.min(data['q']), np.max(data['q'])
 
@@ -74,7 +75,7 @@ def plot_comparison(data, dEdp_model, dEdq_model, simulator, save_path="gpphs_re
 
     ax1 = fig.add_subplot(1, 2, 1, projection='3d')
     ax1.plot_surface(p_grid, q_grid, real_dEdp.reshape(40, 40), cmap='viridis', alpha=0.5, edgecolor='none')
-    ax1.scatter(p_test_flat[::4], q_test_flat[::4], pred_dEdp[::4], color='red', label='GP Prediction', s=12)
+    ax1.scatter(p_test_flat[::4], q_test_flat[::4], pred_dEdp[::4], color='red', label=f'GP Prediction ({legend_tag})', s=12)
     ax1.set_title('dH/dp (Kinetic Energy Gradient Profile)', fontsize=12)
     ax1.set_xlabel('p')
     ax1.set_ylabel('q')
@@ -82,7 +83,7 @@ def plot_comparison(data, dEdp_model, dEdq_model, simulator, save_path="gpphs_re
 
     ax2 = fig.add_subplot(1, 2, 2, projection='3d')
     ax2.plot_surface(p_grid, q_grid, real_dEdq.reshape(40, 40), cmap='plasma', alpha=0.5, edgecolor='none')
-    ax2.scatter(p_test_flat[::4], q_test_flat[::4], pred_dEdq[::4], color='blue', label='GP Prediction', s=12)
+    ax2.scatter(p_test_flat[::4], q_test_flat[::4], pred_dEdq[::4], color='blue', label=f'GP Prediction ({legend_tag})', s=12)
     ax2.set_title(f'dH/dq (Strain Energy Gradient at z={z_val:.2f})', fontsize=12)
     ax2.set_xlabel('p')
     ax2.set_ylabel('q')
@@ -94,7 +95,8 @@ def plot_comparison(data, dEdp_model, dEdq_model, simulator, save_path="gpphs_re
     print(f"[SUCCESS] Graphical evaluation saved as '{save_path}'")
 
 
-def plot_time_slices(data, q_gp, simulator, time_slices, save_path="gpphs_string_slices.png"):
+def plot_time_slices(data, q_gp, simulator, time_slices,
+                     save_path="gpphs_string_slices.png", legend_tag="baseline"):
     """
     Plots the spatial shape of the 1D string (displacement u) at specific time steps
     comparing the True Numerical Solution vs the GP-PHS Rollout.
@@ -109,6 +111,8 @@ def plot_time_slices(data, q_gp, simulator, time_slices, save_path="gpphs_string
 
     fig, axs = plt.subplots(1, len(time_slices), figsize=(18, 5), sharey=True)
 
+    fig.suptitle("1D String Configuration (Varying Spatial stiffness)", fontsize=16, fontweight='bold')
+
     for idx, step in enumerate(time_slices):
         if step >= u_true.shape[1] or step >= u_gp.shape[1]:
             print(f"[WARNING] Time step {step} is out of bounds for current simulation length.")
@@ -117,7 +121,7 @@ def plot_time_slices(data, q_gp, simulator, time_slices, save_path="gpphs_string
         time_val = step * simulator.dt
 
         axs[idx].plot(z, u_true[:, step], 'k-', linewidth=2.5, label='True Numerical PDE')
-        axs[idx].plot(z, u_gp[:, step], 'r--', linewidth=2.5, label='GP-PHS Rollout')
+        axs[idx].plot(z, u_gp[:, step], 'r--', linewidth=2.5, label=f'GP-PHS Prediction ({legend_tag})')
 
         axs[idx].set_title(f'Time Step = {step} ({time_val:.2f}s)', fontsize=12)
         axs[idx].set_xlabel('Spatial Coordinate (z)', fontsize=10)
@@ -126,7 +130,7 @@ def plot_time_slices(data, q_gp, simulator, time_slices, save_path="gpphs_string
         axs[idx].grid(True, linestyle=':', alpha=0.6)
         axs[idx].legend(loc='upper right')
 
-    plt.tight_layout()
+    plt.tight_layout(rect=(0, 0, 1, 0.93))
     plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"[SUCCESS] 1D String time-slice comparisons saved as '{save_path}'")
