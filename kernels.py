@@ -13,6 +13,21 @@ class BaselineRBFKernel(gpytorch.kernels.Kernel):
         return self.rbf(x1, x2, diag=diag, **params)
 
 
+class MomentumKernel(gpytorch.kernels.Kernel):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # self.p_kernel = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=1))
+        self.p_kernel = gpytorch.kernels.LinearKernel()
+
+    def forward(self, x1, x2, diag=False, **params):
+        # x1, x2 are [N, 2] -> col 0 is q, col 1 is z
+        p1 = x1[..., 0:1]
+        p2 = x2[..., 0:1]
+        cov_momentum = self.p_kernel(p1, p2, diag=diag, **params)
+
+        return cov_momentum
+
+
 class StructuralDecoupledKernel(gpytorch.kernels.Kernel):
     def __init__(self, spatial_kernel_type="rbf", n_freqs=3, **kwargs):
         super().__init__(**kwargs)
@@ -20,7 +35,7 @@ class StructuralDecoupledKernel(gpytorch.kernels.Kernel):
         if spatial_kernel_type == "rbf":
             self.spatial_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=1)
         elif spatial_kernel_type == "gibbs":
-            self.spatial_kernel = GibbsSpatialKernel(nfreqs=n_freqs, **kwargs)
+            self.spatial_kernel = GibbsSpatialKernel(n_freqs=n_freqs, **kwargs)
         else:
             raise ValueError(f"Unknown spatial kernel type: {spatial_kernel_type}")
 
@@ -42,7 +57,7 @@ class GibbsStateKernel(gpytorch.kernels.Kernel):
         self.n_freqs = n_freqs
         # The base kernel operates on the full 3D vector: (p, q, z_warped)
         self.base_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=3)
-        self.spatial_kernel = GibbsSpatialKernel(nfreqs=n_freqs, **kwargs)
+        self.spatial_kernel = GibbsSpatialKernel(n_freqs=n_freqs, **kwargs)
 
 
     def forward(self, x1, x2, diag=False, **params):
@@ -50,7 +65,7 @@ class GibbsStateKernel(gpytorch.kernels.Kernel):
         p1, q1, z1 = x1[..., 0:1], x1[..., 1:2], x1[..., 2:3]
         p2, q2, z2 = x2[..., 0:1], x2[..., 1:2], x2[..., 2:3]
 
-        z1_warped, z2_warped = self.spatial_kernel.get_warped_z(p1, p2)
+        z1_warped, z2_warped = self.spatial_kernel.get_warped_z(z1, z2)
 
         # 3. Attach the transformed z back to the original (p, q) vectors
         v1 = torch.cat([p1, q1, z1_warped], dim=-1)

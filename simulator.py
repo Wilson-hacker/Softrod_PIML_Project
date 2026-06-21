@@ -100,3 +100,32 @@ class SoftRodSimulator:
             'dH_dp': grad_H_p, 'dH_dq': grad_H_q,
             't': sol.t, 'z': self.z
         }
+
+    def energy_density(self, p, q):
+        """
+        Hamiltonian density:
+            h(p,q,z) = 1/2 p^2 + 1/2 k(z) q^2 + 1/2 q^4
+
+        Supports:
+            p, q shape [N] or [N, T]
+        """
+        k = self.stiffness
+
+        if p.ndim == 1:
+            return 0.5 * p ** 2 + 0.5 * k * q ** 2 + 0.5 * q ** 4
+
+        if p.ndim == 2:
+            return 0.5 * p ** 2 + 0.5 * k[:, None] * q ** 2 + 0.5 * q ** 4
+
+        raise ValueError(f"Expected p, q to have ndim 1 or 2, got {p.ndim}.")
+
+    def total_energy(self, p, q):
+        """
+        Spatial integral of the Hamiltonian density.
+
+        Returns:
+            scalar if p, q are [N]
+            array of shape [T] if p, q are [N, T]
+        """
+        density = self.energy_density(p, q)
+        return np.trapezoid(density, self.z, axis=0)

@@ -16,6 +16,9 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
         if kernel_type == "baseline":
             from kernels import BaselineRBFKernel
             self.covar_module = BaselineRBFKernel()
+        elif kernel_type == "P_only":
+            from kernels import MomentumKernel
+            self.covar_module = MomentumKernel()
         elif kernel_type == "SD":
             from kernels import StructuralDecoupledKernel
             if hybird:

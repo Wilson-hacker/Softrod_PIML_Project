@@ -7,7 +7,13 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from simulator import SoftRodSimulator
 from model import train_gp_model
-from utils import plot_comparison, simulate_gp_phs, plot_time_slices
+from utils import (
+    simulate_gp_phs,
+    plot_comparison,
+    plot_time_slices,
+    evaluate_gp_phs_model,
+    print_metrics_report,
+)
 
 
 def run_pipeline(tag_str, kernel_type="baseline", hybird=False, n_freqs=10):
@@ -46,7 +52,7 @@ def run_pipeline(tag_str, kernel_type="baseline", hybird=False, n_freqs=10):
     y_q_train_norm = (y_dEdq_train - y_q_mean) / (y_q_std + 1e-6)
 
     print("\n--- Step 2: Training GP-PHS Component Models ---")
-    dEdp_model, dEdp_lh = train_gp_model(X_train_norm, y_p_train_norm, kernel_type="baseline", training_iter=1000, patience=15)
+    dEdp_model, dEdp_lh = train_gp_model(X_train_norm, y_p_train_norm, kernel_type="P_only", training_iter=1000, patience=15)
     dEdq_model, dEdq_lh = train_gp_model(X_train_norm, y_q_train_norm, kernel_type=kernel_type, hybird=hybird, n_freqs=n_freqs, training_iter=1000, patience=15)
 
     # Store normalization stats directly on the models for easy access in utils.py
@@ -61,8 +67,22 @@ def run_pipeline(tag_str, kernel_type="baseline", hybird=False, n_freqs=10):
     print("\n--- Step 4: Running Dynamic Rollout and Time-Slice Comparisons ---")
     p_gp, q_gp = simulate_gp_phs(sim, dEdp_model, dEdq_model)
     plot_time_slices(data, q_gp, sim, time_slices=[0, 50, 100], save_path=f"./plots/string_slices_{tag_str}.png", legend_tag=tag_str)
+
+    print("\n--- Step 5: Computing Paper-Ready Evaluation Metrics ---")
+    metrics, H_true, H_gp = evaluate_gp_phs_model(
+        data=data,
+        simulator=sim,
+        p_gp=p_gp,
+        q_gp=q_gp,
+        dEdp_model=dEdp_model,
+        dEdq_model=dEdq_model,
+        dEdp_likelihood=dEdp_lh,
+        dEdq_likelihood=dEdq_lh,
+        downscale_factor=downscale_factor,
+    )
+    print_metrics_report(metrics)
     print("Pipeline execution completed successfully.\n")
 
 
 if __name__ == '__main__':
-    run_pipeline("SD", kernel_type="SD")
+    run_pipeline("SD_linear", kernel_type="SD", hybird=False, n_freqs=30)
