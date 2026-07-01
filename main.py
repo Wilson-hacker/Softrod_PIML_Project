@@ -16,9 +16,9 @@ from utils import (
 )
 
 
-def run_pipeline(tag_str, kernel_type="baseline", hybird=False, n_freqs=10):
+def run_pipeline(tag_str, param_dict, kernel_type="baseline"):
     print("\n--- Step 1: Solving Soft Robot PDE via Numerical Integrators ---")
-    sim = SoftRodSimulator(L=10.0, N=60, T=5.5, dt=0.05, num_hinges=4)
+    sim = SoftRodSimulator(L=10.0, N=60, T=5.5, dt=0.05, num_hinges=param_dict["num_hinges"], stiffness_profile=param_dict["stiffness_profile"])
     data = sim.generate_dataset()
 
     p_flat = data['p'].flatten()
@@ -52,8 +52,8 @@ def run_pipeline(tag_str, kernel_type="baseline", hybird=False, n_freqs=10):
     y_q_train_norm = (y_dEdq_train - y_q_mean) / (y_q_std + 1e-6)
 
     print("\n--- Step 2: Training GP-PHS Component Models ---")
-    dEdp_model, dEdp_lh = train_gp_model(X_train_norm, y_p_train_norm, kernel_type="P_only", training_iter=1000, patience=15)
-    dEdq_model, dEdq_lh = train_gp_model(X_train_norm, y_q_train_norm, kernel_type=kernel_type, hybird=hybird, n_freqs=n_freqs, training_iter=1000, patience=15)
+    dEdp_model, dEdp_lh = train_gp_model(X_train_norm, y_p_train_norm, param_dict, kernel_type="baseline", training_iter=1000, patience=15)
+    dEdq_model, dEdq_lh = train_gp_model(X_train_norm, y_q_train_norm, param_dict, kernel_type=kernel_type, training_iter=1000, patience=15)
 
     # Store normalization stats directly on the models for easy access in utils.py
     dEdp_model.X_mean, dEdp_model.X_std = X_mean, X_std
@@ -62,7 +62,7 @@ def run_pipeline(tag_str, kernel_type="baseline", hybird=False, n_freqs=10):
     dEdq_model.y_mean, dEdq_model.y_std = y_q_mean, y_q_std
 
     print("\n--- Step 3: Projecting and Evaluating System Approximations ---")
-    plot_comparison(data, dEdp_model, dEdq_model, sim, save_path=f"./plots/H_landscape_{tag_str}.png")
+    plot_comparison(data, dEdp_model, dEdq_model, sim, save_path=f"./plots/H_landscape_{tag_str}.png", legend_tag=tag_str)
 
     print("\n--- Step 4: Running Dynamic Rollout and Time-Slice Comparisons ---")
     p_gp, q_gp = simulate_gp_phs(sim, dEdp_model, dEdq_model)
@@ -85,4 +85,14 @@ def run_pipeline(tag_str, kernel_type="baseline", hybird=False, n_freqs=10):
 
 
 if __name__ == '__main__':
-    run_pipeline("SD_linear", kernel_type="SD", hybird=False, n_freqs=30)
+    param_dict = {
+        "stiffness_profile": "sharp",
+        "num_hinges": 2,
+        "strain_kernel": "rbf",
+        "spatial_kernel": "rbf",
+        "matern_nu": 2.5,
+        "changepoint_location": 5.0,
+        "changepoint_width": 0.5,
+        "n_freqs": 10
+    }
+    run_pipeline("sharp_baseline", param_dict, kernel_type="baseline")

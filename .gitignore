@@ -3,6 +3,7 @@
 # ---------------------------------------------------
 # Ignore massive image datasets and CSVs
 plots/
+test.py
 *.csv
 
 # Ignore saved PyTorch model weights

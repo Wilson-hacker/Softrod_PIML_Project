@@ -2,8 +2,120 @@ import numpy as np
 from scipy.integrate import solve_ivp
 
 
+def periodic_stiffness(num_hinges, length, z_arr):
+    hinge_freq = num_hinges * np.pi / length
+    return 10.0 + 4.0 * np.cos(2 * hinge_freq * z_arr)
+
+def c2_multiscale_stiffness(
+    num_bumps,
+    length,
+    z_arr,
+    k_min=5.0,
+    k_max=18.0,
+    seed=0,
+    min_radius_frac=0.035,
+    max_radius_frac=0.12,
+):
+    """
+    Rough but C^2 stiffness profile using compactly supported Wendland C^2 bumps.
+
+    Regularity:
+        C^2, but not generally C^3.
+
+    Why this is harder than the previous version:
+        - more bumps,
+        - random centers,
+        - multiple spatial scales,
+        - variation distributed across the full domain,
+        - rescaled to a fixed positive stiffness range [k_min, k_max].
+    """
+    z_arr = np.asarray(z_arr)
+    rng = np.random.default_rng(seed)
+
+    centers = rng.uniform(0.0, length, size=num_bumps)
+    radii = rng.uniform(
+        min_radius_frac * length,
+        max_radius_frac * length,
+        size=num_bumps,
+    )
+    weights = rng.normal(loc=0.0, scale=1.0, size=num_bumps)
+
+    profile = np.zeros_like(z_arr, dtype=float)
+
+    for center, radius, weight in zip(centers, radii, weights):
+        r = np.abs(z_arr - center) / radius
+
+        # Wendland C^2:
+        # phi(r) = (1-r)^4_+ (4r+1)
+        phi = np.where(
+            r < 1.0,
+            (1.0 - r) ** 4 * (4.0 * r + 1.0),
+            0.0,
+        )
+
+        profile += weight * phi
+
+    # Add a mild low-frequency component so the whole domain is affected.
+    profile += 0.5 * np.sin(2.0 * np.pi * z_arr / length)
+    profile += 0.3 * np.cos(4.0 * np.pi * z_arr / length)
+
+    # Rescale to [k_min, k_max].
+    p_min = np.min(profile)
+    p_max = np.max(profile)
+
+    if p_max - p_min < 1e-12:
+        return np.full_like(z_arr, 0.5 * (k_min + k_max))
+
+    profile_01 = (profile - p_min) / (p_max - p_min)
+    stiffness = k_min + (k_max - k_min) * profile_01
+
+    return stiffness
+
+def piecewise_stiffness(num_segments, length, z_arr, values=None):
+    """
+    Piecewise-constant stiffness profile.
+
+    Regularity: discontinuous at segment boundaries.
+    Useful for testing changepoint or piecewise kernels.
+    """
+    z_arr = np.asarray(z_arr)
+
+    if values is None:
+        # Deterministic alternating stiffness values.
+        base_values = np.array([6.0, 14.0, 8.0, 12.0])
+        values = np.resize(base_values, num_segments)
+    else:
+        values = np.asarray(values, dtype=float)
+        if len(values) != num_segments:
+            raise ValueError("Length of values must match num_segments.")
+
+    edges = np.linspace(0.0, length, num_segments + 1)
+
+    # idx tells which segment each z belongs to.
+    idx = np.digitize(z_arr, edges[1:-1], right=False)
+
+    return values[idx]
+
+def sharp_transition_stiffness(length, z_arr, low=6.0, high=14.0, center=None, width=0.1):
+    """
+    Smooth but sharp transition between two stiffness levels.
+
+    Regularity: smooth for finite width, but approaches a discontinuous
+    step as width -> 0.
+    Useful for testing changepoint kernels and robustness to sharp interfaces.
+    """
+    z_arr = np.asarray(z_arr)
+
+    if center is None:
+        center = 0.5 * length
+
+    transition = 0.5 * (1.0 + np.tanh((z_arr - center) / width))
+
+    return low * (1.0 - transition) + high * transition
+
+
 class SoftRodSimulator:
-    def __init__(self, L=10.0, N=100, T=5.0, dt=0.01, num_hinges=4):
+    def __init__(self, L=10.0, N=100, T=5.0, dt=0.01, num_hinges=4, stiffness_profile="periodic"):
         self.L = L
         self.N = N
         self.T = T
@@ -13,8 +125,17 @@ class SoftRodSimulator:
         self.damping = 0.05
 
         # Geometry: varying stiffness k(z) for "thin hinges"
-        hinge_freq = num_hinges * np.pi / L
-        self.stiffness = 10.0 + 4.0 * np.cos(2 * hinge_freq * self.z)
+        if stiffness_profile == "periodic":
+            self.stiffness = periodic_stiffness(num_hinges, L, self.z)
+        elif stiffness_profile == "C2":
+            self.stiffness = c2_multiscale_stiffness(num_hinges, L, self.z)
+        elif stiffness_profile == "piecewise":
+            self.stiffness = piecewise_stiffness(num_hinges, L, self.z)
+        elif stiffness_profile == "sharp":
+            self.stiffness = sharp_transition_stiffness(L, self.z)
+        else:
+            raise ValueError(f"Unknown stiffness profile: {stiffness_profile}")
+
 
     def dEdq(self, q, z_idx):
         """Derivative of strain energy w.r.t strain"""

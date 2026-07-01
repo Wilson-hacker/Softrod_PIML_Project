@@ -9,7 +9,7 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
     You will instantiate two of these: one for dE/dp, one for dE/dq.
     """
 
-    def __init__(self, train_x, train_y, likelihood, kernel_type="baseline", hybird=False, n_freqs=10):
+    def __init__(self, train_x, train_y, likelihood, param_dict, kernel_type="baseline"):
         super(EnergyGradientGP, self).__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ZeroMean()  # Physics prior: assume 0 energy gradient initially
 
@@ -21,13 +21,11 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
             self.covar_module = MomentumKernel()
         elif kernel_type == "SD":
             from kernels import StructuralDecoupledKernel
-            if hybird:
-                self.covar_module = StructuralDecoupledKernel(spatial_kernel_type="gibbs", n_freqs=n_freqs)
-            else:
-                self.covar_module = StructuralDecoupledKernel()
+            strain_kernel, spatial_kernel = param_dict["strain_kernel"], param_dict["spatial_kernel"]
+            self.covar_module = StructuralDecoupledKernel(param_dict, strain_kernel_type=strain_kernel, spatial_kernel_type=spatial_kernel)
         elif kernel_type == "gibbs":
             from kernels import GibbsStateKernel
-            self.covar_module = GibbsStateKernel(n_freqs=n_freqs)
+            self.covar_module = GibbsStateKernel(param_dict)
         else:
             raise ValueError("Unknown kernel type")
 
@@ -37,7 +35,7 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
 
-def train_gp_model(train_x, train_y, kernel_type="baseline", hybird=False, n_freqs=10, training_iter=1000, patience=5, min_delta=1e-3):
+def train_gp_model(train_x, train_y, param_dict, kernel_type="baseline", training_iter=1000, patience=5, min_delta=1e-3):
     """
     Handles the PyTorch optimization loop for the GP with an embedded early-stopping mechanism.
 
@@ -50,7 +48,7 @@ def train_gp_model(train_x, train_y, kernel_type="baseline", hybird=False, n_fre
         min_delta: Minimum reduction in loss to qualify as an improvement
     """
     likelihood = gpytorch.likelihoods.GaussianLikelihood()
-    model = EnergyGradientGP(train_x, train_y, likelihood, kernel_type, hybird=hybird, n_freqs=n_freqs)
+    model = EnergyGradientGP(train_x, train_y, likelihood, param_dict, kernel_type)
 
     # Enable training mode
     model.train()

@@ -29,12 +29,35 @@ class MomentumKernel(gpytorch.kernels.Kernel):
 
 
 class StructuralDecoupledKernel(gpytorch.kernels.Kernel):
-    def __init__(self, spatial_kernel_type="rbf", n_freqs=3, **kwargs):
+    def __init__(self, param_dict, strain_kernel_type="rbf", spatial_kernel_type="rbf", **kwargs):
         super().__init__(**kwargs)
-        self.strain_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=1)
+        if strain_kernel_type == "rbf":
+            self.strain_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=1)
+        elif strain_kernel_type == "linear":
+            self.strain_kernel = gpytorch.kernels.LinearKernel()
+        else:
+            raise ValueError(f"Unknown strain kernel type: {strain_kernel_type}")
+
         if spatial_kernel_type == "rbf":
             self.spatial_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=1)
+        elif spatial_kernel_type == "periodic":
+            self.spatial_kernel = gpytorch.kernels.PeriodicKernel(ard_num_dims=1)
+        elif spatial_kernel_type == "matern":
+            matern_nu = param_dict["matern_nu"]
+            self.spatial_kernel = gpytorch.kernels.MaternKernel(
+                nu=matern_nu,
+                ard_num_dims=1
+            )
+        elif spatial_kernel_type == "changepoint":
+            changepoint_location, changepoint_width = param_dict["changepoint_location"], param_dict["changepoint_width"]
+            self.spatial_kernel = ChangepointSpatialKernel(
+                init_location=changepoint_location,
+                init_width=changepoint_width,
+                left_kernel=gpytorch.kernels.RBFKernel(ard_num_dims=1),
+                right_kernel=gpytorch.kernels.RBFKernel(ard_num_dims=1),
+            )
         elif spatial_kernel_type == "gibbs":
+            n_freqs = param_dict["n_freqs"]
             self.spatial_kernel = GibbsSpatialKernel(n_freqs=n_freqs, **kwargs)
         else:
             raise ValueError(f"Unknown spatial kernel type: {spatial_kernel_type}")
@@ -52,12 +75,12 @@ class StructuralDecoupledKernel(gpytorch.kernels.Kernel):
 
 
 class GibbsStateKernel(gpytorch.kernels.Kernel):
-    def __init__(self, n_freqs=3, **kwargs):
+    def __init__(self, param_dict, **kwargs):
         super().__init__(**kwargs)
-        self.n_freqs = n_freqs
+        self.n_freqs = param_dict["n_freqs"]
         # The base kernel operates on the full 3D vector: (p, q, z_warped)
         self.base_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=3)
-        self.spatial_kernel = GibbsSpatialKernel(n_freqs=n_freqs, **kwargs)
+        self.spatial_kernel = GibbsSpatialKernel(n_freqs=self.n_freqs, **kwargs)
 
 
     def forward(self, x1, x2, diag=False, **params):
@@ -103,3 +126,83 @@ class GibbsSpatialKernel(gpytorch.kernels.Kernel):
     def forward(self, x1, x2, diag=False, **params):
         z1_warped, z2_warped = self.get_warped_z(x1, x2)
         return self.base_kernel(z1_warped, z2_warped, diag=diag, **params)
+
+
+class ChangepointSpatialKernel(gpytorch.kernels.Kernel):
+    """
+    Smooth changepoint kernel for 1D spatial coordinate z.
+
+    k(z,z') =
+        (1-s(z))(1-s(z')) k_left(z,z')
+        + s(z)s(z') k_right(z,z')
+
+    where s(z) = sigmoid((z - z0) / width).
+
+    Useful for piecewise stiffness or sharp material transitions.
+    """
+    def __init__(
+        self,
+        left_kernel=None,
+        right_kernel=None,
+        init_location=0.0,
+        init_width=0.5,
+        learn_location=True,
+        learn_width=True,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.left_kernel = (
+            left_kernel
+            if left_kernel is not None
+            else gpytorch.kernels.RBFKernel(ard_num_dims=1)
+        )
+        self.right_kernel = (
+            right_kernel
+            if right_kernel is not None
+            else gpytorch.kernels.RBFKernel(ard_num_dims=1)
+        )
+
+        location = torch.tensor(float(init_location))
+        raw_width = torch.log(torch.expm1(torch.tensor(float(init_width))))
+
+        self.register_parameter(
+            name="raw_location",
+            parameter=torch.nn.Parameter(location),
+        )
+        self.register_parameter(
+            name="raw_width",
+            parameter=torch.nn.Parameter(raw_width),
+        )
+
+        if not learn_location:
+            self.raw_location.requires_grad_(False)
+        if not learn_width:
+            self.raw_width.requires_grad_(False)
+
+    @property
+    def location(self):
+        return self.raw_location
+
+    @property
+    def width(self):
+        return torch.nn.functional.softplus(self.raw_width) + 1e-4
+
+    def gate(self, z):
+        return torch.sigmoid((z - self.location) / self.width)
+
+    def forward(self, x1, x2, diag=False, **params):
+        s1 = self.gate(x1)
+        s2 = self.gate(x2)
+
+        k_left = self.left_kernel(x1, x2, diag=diag, **params)
+        k_right = self.right_kernel(x1, x2, diag=diag, **params)
+
+        if diag:
+            s1_flat = s1.squeeze(-1)
+            s2_flat = s2.squeeze(-1)
+
+            return (1.0 - s1_flat) * (1.0 - s2_flat) * k_left + s1_flat * s2_flat * k_right
+
+        return (1.0 - s1) * (1.0 - s2.transpose(-2, -1)) * k_left + \
+               s1 * s2.transpose(-2, -1) * k_right
