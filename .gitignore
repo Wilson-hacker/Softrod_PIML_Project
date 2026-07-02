@@ -4,6 +4,7 @@
 # Ignore massive image datasets and CSVs
 plots/
 test.py
+diagnostic.py
 *.csv
 
 # Ignore saved PyTorch model weights

@@ -5,9 +5,9 @@ import torch
 import gpytorch
 
 
-def simulate_gp_phs(simulator, dEdp_model, dEdq_model):
+def simulate_gp_phs(simulator, dEdp_model, dEdq_model, get_init_q_config):
     print("Executing GP-PHS trajectory rollout simulation...")
-    q0 = -4.0 * (simulator.z - simulator.L / 2) * np.exp(-(simulator.z - simulator.L / 2) ** 2)
+    q0 = get_init_q_config(simulator.z, simulator.L)
     p0 = np.zeros(simulator.N)
     state0 = np.concatenate([p0, q0])
 
@@ -472,7 +472,7 @@ def evaluate_gp_phs_model(
     dEdq_model,
     dEdp_likelihood=None,
     dEdq_likelihood=None,
-    downscale_factor=10,
+    downscale_factor=0.1,
 ):
     """
     Full evaluation suite for paper reporting.
@@ -499,8 +499,12 @@ def evaluate_gp_phs_model(
 
     if dEdp_likelihood is not None and dEdq_likelihood is not None:
         # Evaluate calibration on points not used in training.
+        num_test = int(X_all.shape[0] * downscale_factor)
+        rng = np.random.default_rng(seed=42)
+        test_idx = rng.choice(X_all.shape[0], size=num_test, replace=False)
+
         heldout_mask = np.ones(X_all.shape[0], dtype=bool)
-        heldout_mask[::downscale_factor] = False
+        heldout_mask[test_idx] = False
 
         X_eval = X_all[heldout_mask]
         y_p_eval = y_p_all[heldout_mask]

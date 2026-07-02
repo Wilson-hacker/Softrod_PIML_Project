@@ -6,46 +6,33 @@ def periodic_stiffness(num_hinges, length, z_arr):
     hinge_freq = num_hinges * np.pi / length
     return 10.0 + 4.0 * np.cos(2 * hinge_freq * z_arr)
 
-def c2_multiscale_stiffness(
-    num_bumps,
-    length,
-    z_arr,
-    k_min=5.0,
-    k_max=18.0,
-    seed=0,
-    min_radius_frac=0.035,
-    max_radius_frac=0.12,
-):
+
+def c2_less_smooth_stiffness(num_bumps, length, z_arr, base=10.0, amp=4.0, radius=None):
     """
-    Rough but C^2 stiffness profile using compactly supported Wendland C^2 bumps.
+    Less-smooth but still C^2 stiffness profile using compactly supported
+    Wendland C^2 basis functions.
 
-    Regularity:
-        C^2, but not generally C^3.
+    Regularity: C^2, but generally not C^3.
+    Useful for testing Matérn kernels with finite smoothness assumptions.
 
-    Why this is harder than the previous version:
-        - more bumps,
-        - random centers,
-        - multiple spatial scales,
-        - variation distributed across the full domain,
-        - rescaled to a fixed positive stiffness range [k_min, k_max].
+    k(z) = base + amp * normalized_sum_of_C2_bumps(z)
     """
     z_arr = np.asarray(z_arr)
-    rng = np.random.default_rng(seed)
 
-    centers = rng.uniform(0.0, length, size=num_bumps)
-    radii = rng.uniform(
-        min_radius_frac * length,
-        max_radius_frac * length,
-        size=num_bumps,
-    )
-    weights = rng.normal(loc=0.0, scale=1.0, size=num_bumps)
+    if radius is None:
+        radius = 0.5 * length / num_bumps
+
+    centers = np.linspace(0.1 * length, 0.9 * length, num_bumps)
+
+    # Alternating bump amplitudes to create spatial heterogeneity.
+    weights = np.array([(-1.0) ** i for i in range(num_bumps)])
 
     profile = np.zeros_like(z_arr, dtype=float)
 
-    for center, radius, weight in zip(centers, radii, weights):
+    for center, weight in zip(centers, weights):
         r = np.abs(z_arr - center) / radius
 
-        # Wendland C^2:
+        # Wendland C^2 function in 1D:
         # phi(r) = (1-r)^4_+ (4r+1)
         phi = np.where(
             r < 1.0,
@@ -55,21 +42,13 @@ def c2_multiscale_stiffness(
 
         profile += weight * phi
 
-    # Add a mild low-frequency component so the whole domain is affected.
-    profile += 0.5 * np.sin(2.0 * np.pi * z_arr / length)
-    profile += 0.3 * np.cos(4.0 * np.pi * z_arr / length)
+    # Normalize to roughly [-1, 1] before scaling.
+    max_abs = np.max(np.abs(profile))
+    if max_abs > 1e-12:
+        profile = profile / max_abs
 
-    # Rescale to [k_min, k_max].
-    p_min = np.min(profile)
-    p_max = np.max(profile)
+    return base + amp * profile
 
-    if p_max - p_min < 1e-12:
-        return np.full_like(z_arr, 0.5 * (k_min + k_max))
-
-    profile_01 = (profile - p_min) / (p_max - p_min)
-    stiffness = k_min + (k_max - k_min) * profile_01
-
-    return stiffness
 
 def piecewise_stiffness(num_segments, length, z_arr, values=None):
     """
@@ -95,6 +74,7 @@ def piecewise_stiffness(num_segments, length, z_arr, values=None):
     idx = np.digitize(z_arr, edges[1:-1], right=False)
 
     return values[idx]
+
 
 def sharp_transition_stiffness(length, z_arr, low=6.0, high=14.0, center=None, width=0.1):
     """
@@ -128,7 +108,7 @@ class SoftRodSimulator:
         if stiffness_profile == "periodic":
             self.stiffness = periodic_stiffness(num_hinges, L, self.z)
         elif stiffness_profile == "C2":
-            self.stiffness = c2_multiscale_stiffness(num_hinges, L, self.z)
+            self.stiffness = c2_less_smooth_stiffness(num_hinges, L, self.z)
         elif stiffness_profile == "piecewise":
             self.stiffness = piecewise_stiffness(num_hinges, L, self.z)
         elif stiffness_profile == "sharp":
@@ -192,8 +172,9 @@ class SoftRodSimulator:
         # Delegate to the structural physics operator
         return self.evaluate_ph_dynamics(p, q, grad_H_p, grad_H_q, t)
 
-    def generate_dataset(self):
-        q0 = -4.0 * (self.z - self.L / 2) * np.exp(-(self.z - self.L / 2) ** 2)
+    def generate_dataset(self, get_init_q_config):
+        q0 = get_init_q_config(self.z, self.L)
+        # q0 = -4.0 * (self.z - self.L / 2) * np.exp(-(self.z - self.L / 2) ** 2)
         p0 = np.zeros(self.N)
         state0 = np.concatenate([p0, q0])
 
