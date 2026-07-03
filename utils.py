@@ -96,6 +96,233 @@ def plot_comparison(data, dEdp_model, dEdq_model,
     print(f"[SUCCESS] Graphical evaluation saved as '{save_path}'")
 
 
+def plot_effort_force_rmse_and_qmax_over_time(
+    dHdq_summary,
+    q_gp,
+    simulator,
+    data=None,
+    edge=5,
+    title="Effort / Force Error and Strain Growth",
+    save_path=None,
+):
+    """
+    Plots over time:
+        1. RMSE of dH/dq
+        2. RMSE of d/dz(dH/dq)
+        3. max_z |q_GP|
+
+    Args:
+        dHdq_summary:
+            Dictionary containing flattened or grid-shaped dH/dq and force fields.
+            Expected keys:
+                "dHdq_mean" or "dHdq_pred"
+                "dHdq_true"
+                "dHdq_force_pred"
+                "dHdq_force_true"
+        q_gp:
+            GP rollout strain, shape [N_z, N_t].
+        simulator:
+            Simulator object with z, dt, and N.
+        data:
+            Optional true data dictionary. If provided and contains data["q"],
+            also plots true max_z |q|.
+        grid_shape:
+            Tuple (N_z, N_t). If None, inferred from q_gp.shape.
+        edge:
+            Number of boundary cells excluded from RMSE and max computations.
+        title:
+            Figure title.
+        save_path:
+            Optional path to save the figure.
+    """
+    N_z, N_t = q_gp.shape
+    interior = slice(edge, N_z - edge)
+
+    # ------------------------------------------------------------
+    # Get dH/dq prediction and true values
+    # ------------------------------------------------------------
+    dHdq_pred = np.asarray(dHdq_summary["dHdq_mean"]).reshape(N_z, N_t)
+    dHdq_true = np.asarray(dHdq_summary["dHdq_true"]).reshape(N_z, N_t)
+
+    # ------------------------------------------------------------
+    # Get force-field prediction and true values
+    # ------------------------------------------------------------
+    force_pred = np.asarray(dHdq_summary["dHdq_force_pred"]).reshape(N_z, N_t)
+    force_true = np.asarray(dHdq_summary["dHdq_force_true"]).reshape(N_z, N_t)
+
+    # ------------------------------------------------------------
+    # Time-resolved RMSEs
+    # ------------------------------------------------------------
+    dHdq_err = dHdq_pred - dHdq_true
+    force_err = force_pred - force_true
+
+    dHdq_rmse_t = np.sqrt(
+        np.nanmean(dHdq_err[interior, :] ** 2, axis=0)
+    )
+
+    force_rmse_t = np.sqrt(
+        np.nanmean(force_err[interior, :] ** 2, axis=0)
+    )
+
+    qmax_gp_t = np.nanmax(np.abs(q_gp[interior, :]), axis=0)
+
+    # ------------------------------------------------------------
+    # Time array
+    # ------------------------------------------------------------
+    if data is not None and "t" in data:
+        t_arr = data["t"]
+    else:
+        t_arr = np.arange(N_t) * simulator.dt
+
+    # ------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------
+    fig, axs = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
+
+    axs[0].plot(t_arr, dHdq_rmse_t)
+    axs[0].set_ylabel(r"RMSE of $\partial_q H$")
+    axs[0].set_title(title)
+    axs[0].grid(True, alpha=0.3)
+
+    axs[1].plot(t_arr, force_rmse_t)
+    axs[1].set_ylabel(r"RMSE of $\partial_z(\partial_q H)$")
+    axs[1].grid(True, alpha=0.3)
+
+    axs[2].plot(t_arr, qmax_gp_t, label=r"GP $\max_z |q|$")
+
+    if data is not None and "q" in data:
+        q_true = data["q"]
+        qmax_true_t = np.nanmax(np.abs(q_true[interior, :]), axis=0)
+        axs[2].plot(t_arr, qmax_true_t, "--", label=r"True $\max_z |q|$")
+
+    axs[2].set_xlabel("t")
+    axs[2].set_ylabel(r"$\max_z |q|$")
+    axs[2].legend()
+    axs[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    if save_path is not None:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    plt.show()
+
+    return {
+        "t": t_arr,
+        "dHdq_rmse_t": dHdq_rmse_t,
+        "force_rmse_t": force_rmse_t,
+        "qmax_gp_t": qmax_gp_t,
+    }
+
+
+def plot_force_field_error_heatmap(
+    dHdq_summary,
+    simulator,
+    data=None,
+    grid_shape=None,
+    edge=5,
+    log_scale=False,
+    title="Force-Field Error Heatmap",
+    save_path=None,
+):
+    """
+    Plots heatmap of force-field error:
+
+        | d/dz(dH/dq_pred) - d/dz(dH/dq_true) |
+
+    Args:
+        dHdq_summary:
+            Dictionary containing:
+                "dHdq_force_error"
+            or containing:
+                "dHdq_force_pred" and "dHdq_force_true"
+        simulator:
+            Simulator object with z and dt.
+        data:
+            Optional data dictionary. If data["t"] exists, uses it for time axis.
+        grid_shape:
+            Tuple (N_z, N_t).
+        edge:
+            Boundary cells to mask out.
+        log_scale:
+            If True, plots log10 absolute error.
+        title:
+            Figure title.
+        save_path:
+            Optional path to save figure.
+    """
+    if grid_shape is None:
+        # Try to infer from simulator.N and force array size.
+        if "dHdq_force_error" in dHdq_summary:
+            total_size = np.asarray(dHdq_summary["dHdq_force_error"]).size
+        else:
+            total_size = np.asarray(dHdq_summary["dHdq_force_pred"]).size
+
+        N_z = simulator.N
+        N_t = total_size // N_z
+    else:
+        N_z, N_t = grid_shape
+
+    # ------------------------------------------------------------
+    # Get force error
+    # ------------------------------------------------------------
+    force_error = np.asarray(dHdq_summary["dHdq_force_error"]).reshape(N_z, N_t)
+    force_error_abs = np.abs(force_error)
+
+    # Mask boundary regions
+    force_error_plot = force_error_abs.copy()
+    force_error_plot[:edge, :] = np.nan
+    force_error_plot[-edge:, :] = np.nan
+
+    if log_scale:
+        force_error_plot = np.log10(force_error_plot + 1e-12)
+        cbar_label = r"$\log_{10}(|\Delta \partial_z(\partial_q H)| + 10^{-12})$"
+    else:
+        cbar_label = r"$|\Delta \partial_z(\partial_q H)|$"
+
+    # ------------------------------------------------------------
+    # Axis arrays
+    # ------------------------------------------------------------
+    z = simulator.z
+
+    if data is not None and "t" in data:
+        t_arr = data["t"]
+    else:
+        t_arr = np.arange(N_t) * simulator.dt
+
+    extent = (t_arr[0], t_arr[-1], z[0], z[-1])
+
+    # ------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------
+    plt.figure(figsize=(9, 4.8))
+
+    im = plt.imshow(
+        force_error_plot,
+        origin="lower",
+        aspect="auto",
+        extent=extent,
+    )
+
+    plt.colorbar(im, label=cbar_label)
+    plt.xlabel("t")
+    plt.ylabel("z")
+    plt.title(title)
+    plt.tight_layout()
+
+    if save_path is not None:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    plt.show()
+
+    return {
+        "force_error_abs": force_error_abs,
+        "force_error_plot": force_error_plot,
+        "t": t_arr,
+        "z": z,
+    }
+
+
 def plot_time_slices(data, q_gp, simulator, time_slices,
                      save_path="gpphs_string_slices.png", legend_tag="baseline"):
     """
@@ -135,6 +362,19 @@ def plot_time_slices(data, q_gp, simulator, time_slices,
     plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"[SUCCESS] 1D String time-slice comparisons saved as '{save_path}'")
+
+
+def spatial_derivative_centered(f, dz, boundary_value=np.nan):
+    """
+    Compute df/dz using the same centered-difference structure as the simulator
+    on interior points.
+
+    Boundary values are set to NaN by default because the simulator imposes
+    boundary conditions separately.
+    """
+    df_dz = np.full_like(f, boundary_value, dtype=float)
+    df_dz[1:-1] = (f[2:] - f[:-2]) / (2.0 * dz)
+    return df_dz
 
 
 def _relative_l2(pred, true, eps=1e-12):
@@ -419,48 +659,153 @@ def compute_single_calibration_metrics(y_true, mean, std):
     }
 
 
+def compute_dHdq_force_metrics_from_predictions(
+    dHdq_pred_flat,
+    dHdq_true_flat,
+    simulator,
+    grid_shape,
+    edge=5,
+):
+    """
+    Compute RMSE of d/dz(dH/dq) using already-computed dH/dq predictions.
+
+    Args:
+        dHdq_pred_flat:
+            Flattened GP-predicted dH/dq values, shape [N_z * N_t].
+        dHdq_true_flat:
+            Flattened true dH/dq values, shape [N_z * N_t].
+        simulator:
+            Simulator object with N and dz.
+        grid_shape:
+            Tuple (N_z, N_t). Must match the flattening order used in
+            make_flat_dataset_from_sim_data().
+        edge:
+            Number of boundary cells to exclude.
+
+    Returns:
+        Dictionary of force-field error metrics.
+    """
+
+    N_z, N_t = grid_shape
+
+    assert N_z == simulator.N, "grid_shape[0] must match simulator.N"
+    assert dHdq_pred_flat.shape[0] == N_z * N_t
+    assert dHdq_true_flat.shape[0] == N_z * N_t
+
+    dHdq_pred = np.asarray(dHdq_pred_flat).reshape(N_z, N_t)
+    dHdq_true = np.asarray(dHdq_true_flat).reshape(N_z, N_t)
+
+    force_pred = np.full_like(dHdq_pred, np.nan, dtype=float)
+    force_true = np.full_like(dHdq_true, np.nan, dtype=float)
+
+    for j in range(N_t):
+        force_pred[:, j] = spatial_derivative_centered(
+            dHdq_pred[:, j],
+            simulator.dz,
+            boundary_value=np.nan,
+        )
+
+        force_true[:, j] = spatial_derivative_centered(
+            dHdq_true[:, j],
+            simulator.dz,
+            boundary_value=np.nan,
+        )
+
+    interior = slice(edge, N_z - edge)
+
+    force_pred_int = force_pred[interior, :]
+    force_true_int = force_true[interior, :]
+
+    force_err = force_pred_int - force_true_int
+    mask = np.isfinite(force_err)
+
+    force_rmse = _rmse(
+        force_pred_int[mask],
+        force_true_int[mask],
+    )
+
+    force_true_rms = float(np.sqrt(np.nanmean(force_true_int**2)) + 1e-12)
+
+    return {
+        "dHdq_force_rmse": force_rmse,
+        "dHdq_force_relative_rmse": force_rmse / force_true_rms,
+        "dHdq_force_true_rms_scale": force_true_rms,
+        "dHdq_force_max_abs_error": float(np.nanmax(np.abs(force_err))),
+    }, {"dHdq_force_pred": force_pred,
+        "dHdq_force_true": force_true,
+        "dHdq_force_error": force_pred - force_true,}
+
+
 def compute_uncertainty_calibration_metrics(
     dEdp_model,
     dEdp_likelihood,
     dEdq_model,
     dEdq_likelihood,
     X_eval,
-    y_p_eval,
-    y_q_eval,
-    max_points=5000,
-    seed=1,
+    dHdp_true,
+    dHdq_true,
+    downscale_factor,
+    simulator,
+    grid_shape,
+    seed=42,
     include_likelihood_noise=True,
 ):
     """
     Computes uncertainty calibration for dH/dp and dH/dq predictions
     on held-out derivative targets.
     """
-    rng = np.random.default_rng(seed)
-
-    if X_eval.shape[0] > max_points:
-        idx = rng.choice(X_eval.shape[0], size=max_points, replace=False)
-        X_eval = X_eval[idx]
-        y_p_eval = y_p_eval[idx]
-        y_q_eval = y_q_eval[idx]
-
-    p_mean, p_std = gp_predict_with_uncertainty(
+    dHdp_mean, dHdp_std = gp_predict_with_uncertainty(
         dEdp_model,
         dEdp_likelihood,
         X_eval,
         include_likelihood_noise=include_likelihood_noise,
     )
 
-    q_mean, q_std = gp_predict_with_uncertainty(
+    dHdq_mean, dHdq_std = gp_predict_with_uncertainty(
         dEdq_model,
         dEdq_likelihood,
         X_eval,
         include_likelihood_noise=include_likelihood_noise,
     )
 
-    return {
-        "dHdp": compute_single_calibration_metrics(y_p_eval, p_mean, p_std),
-        "dHdq": compute_single_calibration_metrics(y_q_eval, q_mean, q_std),
+    # Evaluate calibration on points not used in training.
+    num_test = int(X_eval.shape[0] * downscale_factor)
+    rng = np.random.default_rng(seed=seed)
+    test_idx = rng.choice(X_eval.shape[0], size=num_test, replace=False)
+    heldout_mask = np.ones(X_eval.shape[0], dtype=bool)
+    heldout_mask[test_idx] = False
+
+    metrics = {
+        "dHdp": compute_single_calibration_metrics(
+            dHdp_true[heldout_mask],
+            dHdp_mean[heldout_mask],
+            dHdp_std[heldout_mask],
+        ),
+        "dHdq": compute_single_calibration_metrics(
+            dHdq_true[heldout_mask],
+            dHdq_mean[heldout_mask],
+            dHdq_std[heldout_mask],
+        ),
     }
+
+    if simulator is None or grid_shape is None:
+        raise ValueError(
+            "compute_force_metrics=True requires simulator and grid_shape=(N_z, N_t)."
+        )
+
+    force_metrics, dHdq_summary = compute_dHdq_force_metrics_from_predictions(
+        dHdq_pred_flat=dHdq_mean,
+        dHdq_true_flat=dHdq_true,
+        simulator=simulator,
+        grid_shape=grid_shape,
+    )
+
+    # Store scalar force metrics only inside calibration.
+    metrics["dHdq_force"] = force_metrics
+    dHdq_summary["dHdq_mean"] = dHdq_mean
+    dHdq_summary["dHdq_true"] = dHdq_true
+
+    return metrics, dHdq_summary
 
 
 def evaluate_gp_phs_model(
@@ -473,6 +818,7 @@ def evaluate_gp_phs_model(
     dEdp_likelihood=None,
     dEdq_likelihood=None,
     downscale_factor=0.1,
+    grid_shape=None,
 ):
     """
     Full evaluation suite for paper reporting.
@@ -498,31 +844,21 @@ def evaluate_gp_phs_model(
     }
 
     if dEdp_likelihood is not None and dEdq_likelihood is not None:
-        # Evaluate calibration on points not used in training.
-        num_test = int(X_all.shape[0] * downscale_factor)
-        rng = np.random.default_rng(seed=42)
-        test_idx = rng.choice(X_all.shape[0], size=num_test, replace=False)
-
-        heldout_mask = np.ones(X_all.shape[0], dtype=bool)
-        heldout_mask[test_idx] = False
-
-        X_eval = X_all[heldout_mask]
-        y_p_eval = y_p_all[heldout_mask]
-        y_q_eval = y_q_all[heldout_mask]
-
-        calibration_metrics = compute_uncertainty_calibration_metrics(
+        calibration_metrics, dHdq_summary = compute_uncertainty_calibration_metrics(
             dEdp_model,
             dEdp_likelihood,
             dEdq_model,
             dEdq_likelihood,
-            X_eval,
-            y_p_eval,
-            y_q_eval,
-        )
+            X_all,
+            y_p_all,
+            y_q_all,
+            downscale_factor=downscale_factor,
+            simulator=simulator,
+            grid_shape=grid_shape)
 
         metrics["calibration"] = calibration_metrics
 
-    return metrics, H_true, H_gp
+    return metrics, dHdq_summary, H_true, H_gp
 
 
 def print_metrics_report(metrics):
@@ -551,5 +887,10 @@ def print_metrics_report(metrics):
         print("\n[Uncertainty Calibration: dH/dq]")
         for key, value in metrics["calibration"]["dHdq"].items():
             print(f"  {key:24s}: {value:.6e}")
+
+        if "dHdq_force" in metrics["calibration"]:
+            print("\n[Force-Field Error: d/dz(dH/dq)]")
+            for key, value in metrics["calibration"]["dHdq_force"].items():
+                print(f"  {key:32s}: {value:.6e}")
 
     print("\n============================================================\n")
