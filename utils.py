@@ -5,6 +5,113 @@ import torch
 import gpytorch
 
 
+def stratified_z_indices(
+    X,
+    train_fraction=0.1,
+    seed=42,
+    z_col=2,
+    left_region=(0.0, 2.0),
+    middle_region=(2.0, 8.0),
+    right_region=(8.0, 10.0),
+    weights=(0.30, 0.40, 0.30),
+    include_domain_boundaries=True,
+    shuffle=True,
+):
+    """
+    Returns stratified training indices based on spatial coordinate z.
+
+    Sampling allocation:
+        30% from left region:   0 <= z < 2
+        40% from middle region: 2 <= z < 8
+        30% from right region:  8 <= z <= 10
+
+    Args:
+        X:
+            Input array of shape [N_samples, 3], where X[:, z_col] is z.
+        train_fraction:
+            Fraction of the full dataset to sample.
+        seed:
+            Random seed.
+        z_col:
+            Column index of z in X.
+        left_region, middle_region, right_region:
+            Spatial intervals.
+        weights:
+            Sampling fractions for left, middle, right regions.
+        include_domain_boundaries:
+            If True, include z=0 and z=10 in left/right regions.
+            If False, strictly use 0 < z < 2 and 8 < z < 10.
+        shuffle:
+            Whether to shuffle the final returned index array.
+
+    Returns:
+        train_idx:
+            Array of selected training indices.
+    """
+    rng = np.random.default_rng(seed)
+
+    z = X[:, z_col]
+    num_total = X.shape[0]
+    num_train = int(num_total * train_fraction)
+
+    w_left, w_middle, w_right = weights
+
+    n_left = int(round(num_train * w_left))
+    n_middle = int(round(num_train * w_middle))
+    n_right = num_train - n_left - n_middle
+
+    z0, z1 = left_region
+    z2, z3 = middle_region
+    z4, z5 = right_region
+
+    if include_domain_boundaries:
+        left_mask = (z >= z0) & (z < z1)
+        middle_mask = (z >= z2) & (z < z3)
+        right_mask = (z >= z4) & (z <= z5)
+    else:
+        left_mask = (z > z0) & (z < z1)
+        middle_mask = (z > z2) & (z < z3)
+        right_mask = (z > z4) & (z < z5)
+
+    left_idx_pool = np.where(left_mask)[0]
+    middle_idx_pool = np.where(middle_mask)[0]
+    right_idx_pool = np.where(right_mask)[0]
+
+    def sample_from_pool(pool, n):
+        if len(pool) == 0:
+            return np.array([], dtype=int)
+        n = min(n, len(pool))
+        return rng.choice(pool, size=n, replace=False)
+
+    left_idx = sample_from_pool(left_idx_pool, n_left)
+    middle_idx = sample_from_pool(middle_idx_pool, n_middle)
+    right_idx = sample_from_pool(right_idx_pool, n_right)
+
+    train_idx = np.concatenate([left_idx, middle_idx, right_idx])
+
+    # If some region did not have enough points, fill the remaining budget
+    # from points not already selected.
+    if len(train_idx) < num_train:
+        selected_mask = np.zeros(num_total, dtype=bool)
+        selected_mask[train_idx] = True
+
+        remaining_pool = np.where(~selected_mask)[0]
+        n_missing = num_train - len(train_idx)
+
+        extra_idx = rng.choice(
+            remaining_pool,
+            size=min(n_missing, len(remaining_pool)),
+            replace=False,
+        )
+
+        train_idx = np.concatenate([train_idx, extra_idx])
+
+    if shuffle:
+        rng.shuffle(train_idx)
+
+    return train_idx
+
+
 def simulate_gp_phs(simulator, dEdp_model, dEdq_model, get_init_q_config):
     print("Executing GP-PHS trajectory rollout simulation...")
     q0 = get_init_q_config(simulator.z, simulator.L)
@@ -769,9 +876,18 @@ def compute_uncertainty_calibration_metrics(
     )
 
     # Evaluate calibration on points not used in training.
-    num_test = int(X_eval.shape[0] * downscale_factor)
-    rng = np.random.default_rng(seed=seed)
-    test_idx = rng.choice(X_eval.shape[0], size=num_test, replace=False)
+    # num_test = int(X_eval.shape[0] * downscale_factor)
+    # rng = np.random.default_rng(seed=seed)
+    test_idx = stratified_z_indices(
+        X_eval,
+        train_fraction=downscale_factor,
+        seed=seed,
+        left_region=(0.0, 2.0),
+        middle_region=(2.0, 8.0),
+        right_region=(8.0, 10.0),
+        weights=(0.30, 0.40, 0.30),
+        include_domain_boundaries=True,
+    )
     heldout_mask = np.ones(X_eval.shape[0], dtype=bool)
     heldout_mask[test_idx] = False
 
@@ -819,6 +935,7 @@ def evaluate_gp_phs_model(
     dEdq_likelihood=None,
     downscale_factor=0.1,
     grid_shape=None,
+    seed=42
 ):
     """
     Full evaluation suite for paper reporting.
@@ -854,7 +971,8 @@ def evaluate_gp_phs_model(
             y_q_all,
             downscale_factor=downscale_factor,
             simulator=simulator,
-            grid_shape=grid_shape)
+            grid_shape=grid_shape,
+            seed=seed)
 
         metrics["calibration"] = calibration_metrics
 

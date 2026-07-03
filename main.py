@@ -8,6 +8,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from simulator import SoftRodSimulator
 from model import train_gp_model
 from utils import (
+    stratified_z_indices,
     simulate_gp_phs,
     plot_comparison,
     plot_time_slices,
@@ -29,113 +30,27 @@ def get_test_q_config(z_arr, length):
     return get_train_q_config(z_arr, length)
     # return -3.0 * (z_arr - length * 0.4) * np.exp(-0.8 * (z_arr - length * 0.4) ** 2)
 
-def stratified_z_indices(
-    X,
-    train_fraction=0.1,
-    seed=42,
-    z_col=2,
-    left_region=(0.0, 2.0),
-    middle_region=(2.0, 8.0),
-    right_region=(8.0, 10.0),
-    weights=(0.30, 0.40, 0.30),
-    include_domain_boundaries=True,
-    shuffle=True,
-):
-    """
-    Returns stratified training indices based on spatial coordinate z.
-
-    Sampling allocation:
-        30% from left region:   0 <= z < 2
-        40% from middle region: 2 <= z < 8
-        30% from right region:  8 <= z <= 10
-
-    Args:
-        X:
-            Input array of shape [N_samples, 3], where X[:, z_col] is z.
-        train_fraction:
-            Fraction of the full dataset to sample.
-        seed:
-            Random seed.
-        z_col:
-            Column index of z in X.
-        left_region, middle_region, right_region:
-            Spatial intervals.
-        weights:
-            Sampling fractions for left, middle, right regions.
-        include_domain_boundaries:
-            If True, include z=0 and z=10 in left/right regions.
-            If False, strictly use 0 < z < 2 and 8 < z < 10.
-        shuffle:
-            Whether to shuffle the final returned index array.
-
-    Returns:
-        train_idx:
-            Array of selected training indices.
-    """
-    rng = np.random.default_rng(seed)
-
-    z = X[:, z_col]
-    num_total = X.shape[0]
-    num_train = int(num_total * train_fraction)
-
-    w_left, w_middle, w_right = weights
-
-    n_left = int(round(num_train * w_left))
-    n_middle = int(round(num_train * w_middle))
-    n_right = num_train - n_left - n_middle
-
-    z0, z1 = left_region
-    z2, z3 = middle_region
-    z4, z5 = right_region
-
-    if include_domain_boundaries:
-        left_mask = (z >= z0) & (z < z1)
-        middle_mask = (z >= z2) & (z < z3)
-        right_mask = (z >= z4) & (z <= z5)
+def get_file_tag(kernel_type, param_dict):
+    if kernel_type == "baseline":
+        return "baseline"
+    elif kernel_type == "SD":
+        return f"{param_dict["strain_kernel"]}_{param_dict["spatial_kernel"]}"
+    elif kernel_type == "gibbs":
+        return "warped"
     else:
-        left_mask = (z > z0) & (z < z1)
-        middle_mask = (z > z2) & (z < z3)
-        right_mask = (z > z4) & (z < z5)
+        raise ValueError(f"Unknown kernel type: {kernel_type}")
 
-    left_idx_pool = np.where(left_mask)[0]
-    middle_idx_pool = np.where(middle_mask)[0]
-    right_idx_pool = np.where(right_mask)[0]
+def get_caption_tag(kernel_type, param_dict):
+    if kernel_type == "baseline":
+        return "baseline"
+    elif kernel_type == "SD":
+        return f"SD [{param_dict["strain_kernel"]}+{param_dict["spatial_kernel"]}]"
+    elif kernel_type == "gibbs":
+        return "warped"
+    else:
+        raise ValueError(f"Unknown kernel type: {kernel_type}")
 
-    def sample_from_pool(pool, n):
-        if len(pool) == 0:
-            return np.array([], dtype=int)
-        n = min(n, len(pool))
-        return rng.choice(pool, size=n, replace=False)
-
-    left_idx = sample_from_pool(left_idx_pool, n_left)
-    middle_idx = sample_from_pool(middle_idx_pool, n_middle)
-    right_idx = sample_from_pool(right_idx_pool, n_right)
-
-    train_idx = np.concatenate([left_idx, middle_idx, right_idx])
-
-    # If some region did not have enough points, fill the remaining budget
-    # from points not already selected.
-    if len(train_idx) < num_train:
-        selected_mask = np.zeros(num_total, dtype=bool)
-        selected_mask[train_idx] = True
-
-        remaining_pool = np.where(~selected_mask)[0]
-        n_missing = num_train - len(train_idx)
-
-        extra_idx = rng.choice(
-            remaining_pool,
-            size=min(n_missing, len(remaining_pool)),
-            replace=False,
-        )
-
-        train_idx = np.concatenate([train_idx, extra_idx])
-
-    if shuffle:
-        rng.shuffle(train_idx)
-
-    return train_idx
-
-def run_pipeline(tag_str, param_dict, kernel_type="baseline"):
+def run_pipeline(param_dict, seed=42, kernel_type="baseline"):
     print("\n--- Step 1: Solving Soft Robot PDE via Numerical Integrators ---")
     sim = SoftRodSimulator(L=10.0, N=60, T=5.5, dt=0.05, num_hinges=param_dict["num_hinges"], stiffness_profile=param_dict["stiffness_profile"])
     data = sim.generate_dataset(get_train_q_config)
@@ -157,7 +72,7 @@ def run_pipeline(tag_str, param_dict, kernel_type="baseline"):
     train_idx = stratified_z_indices(
         X,
         train_fraction=downscale_factor,
-        seed=42,
+        seed=seed,
         left_region=(0.0, 2.0),
         middle_region=(2.0, 8.0),
         right_region=(8.0, 10.0),
@@ -194,13 +109,12 @@ def run_pipeline(tag_str, param_dict, kernel_type="baseline"):
     dEdq_model.X_mean, dEdq_model.X_std = X_mean, X_std
     dEdq_model.y_mean, dEdq_model.y_std = y_q_mean, y_q_std
 
-    # print("\n--- Step 3: Projecting and Evaluating System Approximations ---")
-    # plot_comparison(data, dEdp_model, dEdq_model, sim, save_path=f"./plots/H_landscape_{tag_str}.png", legend_tag=tag_str)
-
     print("\n--- Step 3: Running Dynamic Rollout and Time-Slice Comparisons ---")
+    file_tag = get_file_tag(kernel_type, param_dict)
+    title_tag = get_caption_tag(kernel_type, param_dict)
     p_gp, q_gp = simulate_gp_phs(sim, dEdp_model, dEdq_model, get_test_q_config)
     test_data = sim.generate_dataset(get_test_q_config)
-    plot_time_slices(test_data, q_gp, sim, time_slices=[0, 50, 100], save_path=f"./plots/string_slices_{tag_str}.png", legend_tag=tag_str)
+    plot_time_slices(test_data, q_gp, sim, time_slices=[0, 50, 100], save_path=f"./plots/string_slices_{file_tag}.png", legend_tag=title_tag)
 
     print("\n--- Step 4: Computing Paper-Ready Evaluation Metrics ---")
     metrics, dHdq_summary, H_true, H_gp = evaluate_gp_phs_model(
@@ -213,18 +127,20 @@ def run_pipeline(tag_str, param_dict, kernel_type="baseline"):
         dEdp_likelihood=dEdp_lh,
         dEdq_likelihood=dEdq_lh,
         downscale_factor=downscale_factor,
-        grid_shape=(N_pts, T_steps)
+        grid_shape=(N_pts, T_steps),
+        seed=seed
     )
     print_metrics_report(metrics)
 
+    print("\n--- Step 5: Doing Error Analysis on Effort, Force and Strain ---")
     _ = plot_effort_force_rmse_and_qmax_over_time(
         dHdq_summary=dHdq_summary,
         q_gp=q_gp,
         simulator=sim,
         data=test_data,
         edge=5,
-        title="Effort / Force Error and Strain Growth",
-        save_path=None,
+        title=f"Effort / Force Error and Strain Growth ({title_tag})",
+        save_path=f"./plots/force_err_vs_t_{file_tag}.png",
     )
     _ = plot_force_field_error_heatmap(
         dHdq_summary=dHdq_summary,
@@ -233,8 +149,8 @@ def run_pipeline(tag_str, param_dict, kernel_type="baseline"):
         grid_shape=(N_pts, T_steps),
         edge=5,
         log_scale=False,
-        title=r"Force-Field Error: $|\Delta \partial_z(\partial_q H)|$",
-        save_path=None,
+        title=fr"Force-Field Error: $|\Delta \partial_z(\partial_q H)|$ ({title_tag})",
+        save_path=f"./plots/force_field_err_{file_tag}.png",
     )
 
     print("Pipeline execution completed successfully.\n")
@@ -306,11 +222,11 @@ if __name__ == '__main__':
         "stiffness_profile": "periodic",
         "num_hinges": 4,
         "strain_kernel": "rbf",
-        "spatial_kernel": "periodic",
+        "spatial_kernel": "rbf",
         "matern_nu": 2.5,
         "changepoint_location": 5.0,
         "changepoint_width": 0.5,
         "n_freqs": 10
     }
-    run_pipeline("new_periodic", param_dict, kernel_type="SD")
+    run_pipeline(param_dict, kernel_type="SD")
     # run_diagnostic(param_dict)
