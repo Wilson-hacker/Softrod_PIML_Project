@@ -56,7 +56,7 @@ class StructuralDecoupledKernel(gpytorch.kernels.Kernel):
                 left_kernel=gpytorch.kernels.RBFKernel(ard_num_dims=1),
                 right_kernel=gpytorch.kernels.RBFKernel(ard_num_dims=1),
             )
-        elif spatial_kernel_type == "gibbs":
+        elif spatial_kernel_type == "warped":
             n_freqs = param_dict["n_freqs"]
             self.spatial_kernel = GibbsSpatialKernel(n_freqs=n_freqs, **kwargs)
         else:

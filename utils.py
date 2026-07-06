@@ -7,7 +7,7 @@ import gpytorch
 
 def stratified_z_indices(
     X,
-    train_fraction=0.1,
+    train_fraction,
     seed=42,
     z_col=2,
     left_region=(0.0, 2.0),
@@ -110,6 +110,12 @@ def stratified_z_indices(
         rng.shuffle(train_idx)
 
     return train_idx
+
+
+def random_z_indices(X, train_fraction, seed):
+    num_train = int(X.shape[0] * train_fraction)
+    rng = np.random.default_rng(seed=seed)
+    return rng.choice(X.shape[0], size=num_train, replace=False)
 
 
 def simulate_gp_phs(simulator, dEdp_model, dEdq_model, get_init_q_config):
@@ -469,6 +475,115 @@ def plot_time_slices(data, q_gp, simulator, time_slices,
     plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"[SUCCESS] 1D String time-slice comparisons saved as '{save_path}'")
+
+
+def plot_average_time_slices(
+    data,
+    q_gp_mean,
+    q_gp_std,
+    simulator,
+    time_slices,
+    save_path="average_string_slices.png",
+    legend_tag="multi-seed average",
+    show_std_band=True,
+):
+    """
+    Plot average GP-PHS rollout displacement over multiple seeds.
+
+    Args:
+        data:
+            True test data dictionary containing data["q"].
+        q_gp_mean:
+            Mean predicted q over seeds, shape [N_z, N_t].
+        q_gp_std:
+            Std predicted q over seeds, shape [N_z, N_t].
+        simulator:
+            Simulator object.
+        time_slices:
+            Time steps to plot.
+        save_path:
+            Output path.
+        legend_tag:
+            Label for averaged GP prediction.
+        show_std_band:
+            If True, shade +/- 1 std in displacement.
+    """
+
+    q_true = data["q"]
+    z = simulator.z
+    dz = simulator.dz
+
+    u_true = np.cumsum(q_true, axis=0) * dz
+
+    u_gp_mean = np.cumsum(q_gp_mean, axis=0) * dz
+
+    # Approximate displacement std from strain std.
+    # This ignores covariance between spatial points, but is useful visually.
+    u_gp_upper = np.cumsum(q_gp_mean + q_gp_std, axis=0) * dz
+    u_gp_lower = np.cumsum(q_gp_mean - q_gp_std, axis=0) * dz
+
+    fig, axs = plt.subplots(
+        1,
+        len(time_slices),
+        figsize=(6 * len(time_slices), 5),
+        sharey=True,
+    )
+
+    if len(time_slices) == 1:
+        axs = [axs]
+
+    fig.suptitle(
+        "Average 1D String Configuration Across Seeds",
+        fontsize=16,
+        fontweight="bold",
+    )
+
+    for idx, step in enumerate(time_slices):
+        if step >= u_true.shape[1] or step >= u_gp_mean.shape[1]:
+            print(f"[WARNING] Time step {step} is out of bounds.")
+            continue
+
+        time_val = step * simulator.dt
+
+        axs[idx].plot(
+            z,
+            u_true[:, step],
+            "k-",
+            linewidth=2.5,
+            label="True Numerical PDE",
+        )
+
+        axs[idx].plot(
+            z,
+            u_gp_mean[:, step],
+            "r--",
+            linewidth=2.5,
+            label=f"Mean GP-PHS Prediction ({legend_tag})",
+        )
+
+        if show_std_band:
+            axs[idx].fill_between(
+                z,
+                u_gp_lower[:, step],
+                u_gp_upper[:, step],
+                alpha=0.2,
+                label=r"$\pm 1\sigma$ across seeds",
+            )
+
+        axs[idx].set_title(f"Time Step = {step} ({time_val:.2f}s)", fontsize=12)
+        axs[idx].set_xlabel("Spatial Coordinate (z)", fontsize=10)
+
+        if idx == 0:
+            axs[idx].set_ylabel("Displacement Profile (u)", fontsize=11)
+
+        axs[idx].grid(True, linestyle=":", alpha=0.6)
+        axs[idx].legend(loc="upper right")
+
+    plt.tight_layout(rect=(0, 0, 1, 0.93))
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"[SUCCESS] Average rollout time-slice plot saved as '{save_path}'")
 
 
 def spatial_derivative_centered(f, dz, boundary_value=np.nan):
@@ -855,6 +970,7 @@ def compute_uncertainty_calibration_metrics(
     simulator,
     grid_shape,
     seed=42,
+    sampling="random",
     include_likelihood_noise=True,
 ):
     """
@@ -876,18 +992,21 @@ def compute_uncertainty_calibration_metrics(
     )
 
     # Evaluate calibration on points not used in training.
-    # num_test = int(X_eval.shape[0] * downscale_factor)
-    # rng = np.random.default_rng(seed=seed)
-    test_idx = stratified_z_indices(
-        X_eval,
-        train_fraction=downscale_factor,
-        seed=seed,
-        left_region=(0.0, 2.0),
-        middle_region=(2.0, 8.0),
-        right_region=(8.0, 10.0),
-        weights=(0.30, 0.40, 0.30),
-        include_domain_boundaries=True,
-    )
+    if sampling == "random":
+        test_idx = random_z_indices(X_eval, train_fraction=downscale_factor, seed=seed)
+    elif sampling == "stratified":
+        test_idx = stratified_z_indices(
+            X_eval,
+            train_fraction=downscale_factor,
+            seed=seed,
+            left_region=(0.0, 2.0),
+            middle_region=(2.0, 8.0),
+            right_region=(8.0, 10.0),
+            weights=(0.30, 0.40, 0.30),
+            include_domain_boundaries=True,
+        )
+    else:
+        raise ValueError(f"sampling {sampling} is not supported")
     heldout_mask = np.ones(X_eval.shape[0], dtype=bool)
     heldout_mask[test_idx] = False
 
@@ -935,7 +1054,8 @@ def evaluate_gp_phs_model(
     dEdq_likelihood=None,
     downscale_factor=0.1,
     grid_shape=None,
-    seed=42
+    seed=42,
+    sampling="random"
 ):
     """
     Full evaluation suite for paper reporting.
@@ -972,7 +1092,8 @@ def evaluate_gp_phs_model(
             downscale_factor=downscale_factor,
             simulator=simulator,
             grid_shape=grid_shape,
-            seed=seed)
+            seed=seed,
+            sampling=sampling)
 
         metrics["calibration"] = calibration_metrics
 

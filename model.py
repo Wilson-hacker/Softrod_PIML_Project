@@ -23,7 +23,7 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
             from kernels import StructuralDecoupledKernel
             strain_kernel, spatial_kernel = param_dict["strain_kernel"], param_dict["spatial_kernel"]
             self.covar_module = StructuralDecoupledKernel(param_dict, strain_kernel_type=strain_kernel, spatial_kernel_type=spatial_kernel)
-        elif kernel_type == "gibbs":
+        elif kernel_type == "warped":
             from kernels import GibbsStateKernel
             self.covar_module = GibbsStateKernel(param_dict)
         else:
@@ -35,7 +35,7 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
 
-def train_gp_model(train_x, train_y, param_dict, kernel_type="baseline", training_iter=1000, patience=5, min_delta=1e-3):
+def train_gp_model(train_x, train_y, param_dict, kernel_type="baseline", training_iter=1000, patience=5, min_delta=1e-3, verbose=False):
     """
     Handles the PyTorch optimization loop for the GP with an embedded early-stopping mechanism.
 
@@ -78,7 +78,7 @@ def train_gp_model(train_x, train_y, param_dict, kernel_type="baseline", trainin
         current_loss = loss.item()
 
         # Print status updates every 10 iterations
-        if (i + 1) % 20 == 0:
+        if (i + 1) % 20 == 0 and verbose:
             print(f'Iter {i + 1}/{training_iter} - Loss: {current_loss:.3f}')
 
         # --- Early Stopping Logic ---
