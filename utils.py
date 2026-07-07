@@ -153,6 +153,112 @@ def simulate_gp_phs(simulator, dEdp_model, dEdq_model, get_init_q_config):
     return sol.y[:simulator.N, :], sol.y[simulator.N:, :]
 
 
+def compute_effort_force_error_curves(
+    dHdq_summary,
+    q_gp,
+    simulator,
+    data=None,
+    edge=5,
+):
+    """
+    Computes time-resolved:
+        1. RMSE of dH/dq
+        2. RMSE of d/dz(dH/dq)
+        3. max_z |q_GP|
+        4. optional true max_z |q|
+
+    Returns:
+        Dictionary of 1D curves.
+    """
+
+    N_z, N_t = q_gp.shape
+    interior = slice(edge, N_z - edge)
+
+    dHdq_pred = np.asarray(dHdq_summary["dHdq_mean"]).reshape(N_z, N_t)
+    dHdq_true = np.asarray(dHdq_summary["dHdq_true"]).reshape(N_z, N_t)
+
+    force_pred = np.asarray(dHdq_summary["dHdq_force_pred"]).reshape(N_z, N_t)
+    force_true = np.asarray(dHdq_summary["dHdq_force_true"]).reshape(N_z, N_t)
+
+    dHdq_err = dHdq_pred - dHdq_true
+    force_err = force_pred - force_true
+
+    dHdq_rmse_t = np.sqrt(np.nanmean(dHdq_err[interior, :] ** 2, axis=0))
+    force_rmse_t = np.sqrt(np.nanmean(force_err[interior, :] ** 2, axis=0))
+    qmax_gp_t = np.nanmax(np.abs(q_gp[interior, :]), axis=0)
+
+    if data is not None and "q" in data:
+        q_true = data["q"]
+        qmax_true_t = np.nanmax(np.abs(q_true[interior, :]), axis=0)
+    else:
+        qmax_true_t = None
+
+    if data is not None and "t" in data:
+        t_arr = data["t"]
+    else:
+        t_arr = np.arange(N_t) * simulator.dt
+
+    return {
+        "t": t_arr,
+        "dHdq_rmse_t": dHdq_rmse_t,
+        "force_rmse_t": force_rmse_t,
+        "qmax_gp_t": qmax_gp_t,
+        "qmax_true_t": qmax_true_t,
+        "force_error_abs": np.abs(force_err),
+    }
+
+
+def compute_rollout_failure_stats(
+    all_outputs,
+    edge=5,
+    q_growth_failure_threshold=3.0,
+):
+    """
+    Computes rollout failure rate based on q-growth ratio:
+
+        max |q_GP| / max |q_true|
+
+    A seed is counted as failed if the ratio exceeds q_growth_failure_threshold.
+    """
+
+    q_growth_ratios = []
+    failed_seeds = []
+
+    for out in all_outputs:
+        seed = out["seed"]
+        q_gp = out["q_gp"]
+        q_true = out["test_data"]["q"]
+
+        N_z = q_gp.shape[0]
+        interior = slice(edge, N_z - edge)
+
+        q_gp_max = np.nanmax(np.abs(q_gp[interior, :]))
+        q_true_max = np.nanmax(np.abs(q_true[interior, :])) + 1e-12
+
+        ratio = float(q_gp_max / q_true_max)
+        q_growth_ratios.append(ratio)
+
+        if ratio > q_growth_failure_threshold:
+            failed_seeds.append(seed)
+
+    q_growth_ratios = np.array(q_growth_ratios, dtype=float)
+
+    num_failures = len(failed_seeds)
+    num_seeds = len(all_outputs)
+
+    return {
+        "q_growth_failure_threshold": q_growth_failure_threshold,
+        "num_failures": num_failures,
+        "num_seeds": num_seeds,
+        "failure_rate": float(num_failures / num_seeds),
+        "failed_seeds": failed_seeds,
+        "q_growth_ratios": q_growth_ratios,
+        "q_growth_ratio_mean": float(np.mean(q_growth_ratios)),
+        "q_growth_ratio_std": float(np.std(q_growth_ratios, ddof=1)) if num_seeds > 1 else 0.0,
+        "q_growth_ratio_max": float(np.max(q_growth_ratios)),
+    }
+
+
 def plot_comparison(data, dEdp_model, dEdq_model,
                     simulator, save_path="gpphs_results.png", legend_tag="baseline"):
     p_min, p_max = np.min(data['p']), np.max(data['p'])
@@ -209,104 +315,44 @@ def plot_comparison(data, dEdp_model, dEdq_model,
     print(f"[SUCCESS] Graphical evaluation saved as '{save_path}'")
 
 
-def plot_effort_force_rmse_and_qmax_over_time(
-    dHdq_summary,
-    q_gp,
-    simulator,
-    data=None,
-    edge=5,
+def plot_effort_force_rmse_and_qmax_curves(
+    curves,
     title="Effort / Force Error and Strain Growth",
     save_path=None,
 ):
     """
-    Plots over time:
-        1. RMSE of dH/dq
-        2. RMSE of d/dz(dH/dq)
-        3. max_z |q_GP|
+    Plots:
+        1. RMSE of dH/dq over time
+        2. RMSE of d/dz(dH/dq) over time
+        3. max_z |q_GP| over time
 
     Args:
-        dHdq_summary:
-            Dictionary containing flattened or grid-shaped dH/dq and force fields.
-            Expected keys:
-                "dHdq_mean" or "dHdq_pred"
-                "dHdq_true"
-                "dHdq_force_pred"
-                "dHdq_force_true"
-        q_gp:
-            GP rollout strain, shape [N_z, N_t].
-        simulator:
-            Simulator object with z, dt, and N.
-        data:
-            Optional true data dictionary. If provided and contains data["q"],
-            also plots true max_z |q|.
-        grid_shape:
-            Tuple (N_z, N_t). If None, inferred from q_gp.shape.
-        edge:
-            Number of boundary cells excluded from RMSE and max computations.
-        title:
-            Figure title.
-        save_path:
-            Optional path to save the figure.
+        curves:
+            Dictionary containing:
+                "t"
+                "dHdq_rmse_t"
+                "force_rmse_t"
+                "qmax_gp_t"
+                optionally "qmax_true_t"
     """
-    N_z, N_t = q_gp.shape
-    interior = slice(edge, N_z - edge)
 
-    # ------------------------------------------------------------
-    # Get dH/dq prediction and true values
-    # ------------------------------------------------------------
-    dHdq_pred = np.asarray(dHdq_summary["dHdq_mean"]).reshape(N_z, N_t)
-    dHdq_true = np.asarray(dHdq_summary["dHdq_true"]).reshape(N_z, N_t)
+    t = curves["t"]
 
-    # ------------------------------------------------------------
-    # Get force-field prediction and true values
-    # ------------------------------------------------------------
-    force_pred = np.asarray(dHdq_summary["dHdq_force_pred"]).reshape(N_z, N_t)
-    force_true = np.asarray(dHdq_summary["dHdq_force_true"]).reshape(N_z, N_t)
-
-    # ------------------------------------------------------------
-    # Time-resolved RMSEs
-    # ------------------------------------------------------------
-    dHdq_err = dHdq_pred - dHdq_true
-    force_err = force_pred - force_true
-
-    dHdq_rmse_t = np.sqrt(
-        np.nanmean(dHdq_err[interior, :] ** 2, axis=0)
-    )
-
-    force_rmse_t = np.sqrt(
-        np.nanmean(force_err[interior, :] ** 2, axis=0)
-    )
-
-    qmax_gp_t = np.nanmax(np.abs(q_gp[interior, :]), axis=0)
-
-    # ------------------------------------------------------------
-    # Time array
-    # ------------------------------------------------------------
-    if data is not None and "t" in data:
-        t_arr = data["t"]
-    else:
-        t_arr = np.arange(N_t) * simulator.dt
-
-    # ------------------------------------------------------------
-    # Plot
-    # ------------------------------------------------------------
     fig, axs = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
 
-    axs[0].plot(t_arr, dHdq_rmse_t)
+    axs[0].plot(t, curves["dHdq_rmse_t"])
     axs[0].set_ylabel(r"RMSE of $\partial_q H$")
     axs[0].set_title(title)
     axs[0].grid(True, alpha=0.3)
 
-    axs[1].plot(t_arr, force_rmse_t)
+    axs[1].plot(t, curves["force_rmse_t"])
     axs[1].set_ylabel(r"RMSE of $\partial_z(\partial_q H)$")
     axs[1].grid(True, alpha=0.3)
 
-    axs[2].plot(t_arr, qmax_gp_t, label=r"GP $\max_z |q|$")
+    axs[2].plot(t, curves["qmax_gp_t"], label=r"GP $\max_z |q|$")
 
-    if data is not None and "q" in data:
-        q_true = data["q"]
-        qmax_true_t = np.nanmax(np.abs(q_true[interior, :]), axis=0)
-        axs[2].plot(t_arr, qmax_true_t, "--", label=r"True $\max_z |q|$")
+    if curves.get("qmax_true_t") is not None:
+        axs[2].plot(t, curves["qmax_true_t"], "--", label=r"True $\max_z |q|$")
 
     axs[2].set_xlabel("t")
     axs[2].set_ylabel(r"$\max_z |q|$")
@@ -317,21 +363,17 @@ def plot_effort_force_rmse_and_qmax_over_time(
 
     if save_path is not None:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
-
-    plt.show()
-
-    return {
-        "t": t_arr,
-        "dHdq_rmse_t": dHdq_rmse_t,
-        "force_rmse_t": force_rmse_t,
-        "qmax_gp_t": qmax_gp_t,
-    }
+        plt.close()
+        print(f"[SUCCESS] Effort/force curve plot saved as '{save_path}'")
+    else:
+        plt.show()
 
 
 def plot_force_field_error_heatmap(
-    dHdq_summary,
     simulator,
     data=None,
+    force_error_abs=None,
+    dHdq_summary=None,
     grid_shape=None,
     edge=5,
     log_scale=False,
@@ -343,46 +385,28 @@ def plot_force_field_error_heatmap(
 
         | d/dz(dH/dq_pred) - d/dz(dH/dq_true) |
 
-    Args:
-        dHdq_summary:
-            Dictionary containing:
-                "dHdq_force_error"
-            or containing:
-                "dHdq_force_pred" and "dHdq_force_true"
-        simulator:
-            Simulator object with z and dt.
-        data:
-            Optional data dictionary. If data["t"] exists, uses it for time axis.
-        grid_shape:
-            Tuple (N_z, N_t).
-        edge:
-            Boundary cells to mask out.
-        log_scale:
-            If True, plots log10 absolute error.
-        title:
-            Figure title.
-        save_path:
-            Optional path to save figure.
+    Works for:
+        - individual seed heatmap
+        - average heatmap across seeds
     """
-    if grid_shape is None:
-        # Try to infer from simulator.N and force array size.
-        if "dHdq_force_error" in dHdq_summary:
+
+    if force_error_abs is None:
+        if dHdq_summary is None:
+            raise ValueError("Provide either force_error_abs or dHdq_summary.")
+
+        if grid_shape is None:
             total_size = np.asarray(dHdq_summary["dHdq_force_error"]).size
+            N_z = simulator.N
+            N_t = total_size // N_z
         else:
-            total_size = np.asarray(dHdq_summary["dHdq_force_pred"]).size
+            N_z, N_t = grid_shape
 
-        N_z = simulator.N
-        N_t = total_size // N_z
+        force_error = np.asarray(dHdq_summary["dHdq_force_error"]).reshape(N_z, N_t)
+        force_error_abs = np.abs(force_error)
     else:
-        N_z, N_t = grid_shape
+        force_error_abs = np.asarray(force_error_abs)
+        N_z, N_t = force_error_abs.shape
 
-    # ------------------------------------------------------------
-    # Get force error
-    # ------------------------------------------------------------
-    force_error = np.asarray(dHdq_summary["dHdq_force_error"]).reshape(N_z, N_t)
-    force_error_abs = np.abs(force_error)
-
-    # Mask boundary regions
     force_error_plot = force_error_abs.copy()
     force_error_plot[:edge, :] = np.nan
     force_error_plot[-edge:, :] = np.nan
@@ -393,9 +417,6 @@ def plot_force_field_error_heatmap(
     else:
         cbar_label = r"$|\Delta \partial_z(\partial_q H)|$"
 
-    # ------------------------------------------------------------
-    # Axis arrays
-    # ------------------------------------------------------------
     z = simulator.z
 
     if data is not None and "t" in data:
@@ -405,9 +426,6 @@ def plot_force_field_error_heatmap(
 
     extent = (t_arr[0], t_arr[-1], z[0], z[-1])
 
-    # ------------------------------------------------------------
-    # Plot
-    # ------------------------------------------------------------
     plt.figure(figsize=(9, 4.8))
 
     im = plt.imshow(
@@ -425,8 +443,10 @@ def plot_force_field_error_heatmap(
 
     if save_path is not None:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
-
-    plt.show()
+        plt.close()
+        print(f"[SUCCESS] Force-field heatmap saved as '{save_path}'")
+    else:
+        plt.show()
 
     return {
         "force_error_abs": force_error_abs,
@@ -436,77 +456,18 @@ def plot_force_field_error_heatmap(
     }
 
 
-def plot_time_slices(data, q_gp, simulator, time_slices,
-                     save_path="gpphs_string_slices.png", legend_tag="baseline"):
-    """
-    Plots the spatial shape of the 1D string (displacement u) at specific time steps
-    comparing the True Numerical Solution vs the GP-PHS Rollout.
-    """
-    q_true = data['q']
-    z = simulator.z
-    dz = simulator.dz
-
-    # Calculate displacement u(z) by integrating the strain q spatially
-    u_true = np.cumsum(q_true, axis=0) * dz
-    u_gp = np.cumsum(q_gp, axis=0) * dz
-
-    fig, axs = plt.subplots(1, len(time_slices), figsize=(18, 5), sharey=True)
-
-    fig.suptitle("1D String Configuration (Varying Spatial stiffness)", fontsize=16, fontweight='bold')
-
-    for idx, step in enumerate(time_slices):
-        if step >= u_true.shape[1] or step >= u_gp.shape[1]:
-            print(f"[WARNING] Time step {step} is out of bounds for current simulation length.")
-            continue
-
-        time_val = step * simulator.dt
-
-        axs[idx].plot(z, u_true[:, step], 'k-', linewidth=2.5, label='True Numerical PDE')
-        axs[idx].plot(z, u_gp[:, step], 'r--', linewidth=2.5, label=f'GP-PHS Prediction ({legend_tag})')
-
-        axs[idx].set_title(f'Time Step = {step} ({time_val:.2f}s)', fontsize=12)
-        axs[idx].set_xlabel('Spatial Coordinate (z)', fontsize=10)
-        if idx == 0:
-            axs[idx].set_ylabel('Displacement Profile (u)', fontsize=11)
-        axs[idx].grid(True, linestyle=':', alpha=0.6)
-        axs[idx].legend(loc='upper right')
-
-    plt.tight_layout(rect=(0, 0, 1, 0.93))
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-    print(f"[SUCCESS] 1D String time-slice comparisons saved as '{save_path}'")
-
-
-def plot_average_time_slices(
+def plot_rollout_time_slices(
     data,
-    q_gp_mean,
-    q_gp_std,
+    q_pred,
     simulator,
     time_slices,
-    save_path="average_string_slices.png",
-    legend_tag="multi-seed average",
-    show_std_band=True,
+    save_path=None,
+    legend_tag="GP-PHS",
+    title="1D String Configuration",
+    pred_label_prefix="GP-PHS Prediction",
 ):
     """
-    Plot average GP-PHS rollout displacement over multiple seeds.
-
-    Args:
-        data:
-            True test data dictionary containing data["q"].
-        q_gp_mean:
-            Mean predicted q over seeds, shape [N_z, N_t].
-        q_gp_std:
-            Std predicted q over seeds, shape [N_z, N_t].
-        simulator:
-            Simulator object.
-        time_slices:
-            Time steps to plot.
-        save_path:
-            Output path.
-        legend_tag:
-            Label for averaged GP prediction.
-        show_std_band:
-            If True, shade +/- 1 std in displacement.
+    Plots displacement u(z,t) time slices.
     """
 
     q_true = data["q"]
@@ -514,13 +475,7 @@ def plot_average_time_slices(
     dz = simulator.dz
 
     u_true = np.cumsum(q_true, axis=0) * dz
-
-    u_gp_mean = np.cumsum(q_gp_mean, axis=0) * dz
-
-    # Approximate displacement std from strain std.
-    # This ignores covariance between spatial points, but is useful visually.
-    u_gp_upper = np.cumsum(q_gp_mean + q_gp_std, axis=0) * dz
-    u_gp_lower = np.cumsum(q_gp_mean - q_gp_std, axis=0) * dz
+    u_pred = np.cumsum(q_pred, axis=0) * dz
 
     fig, axs = plt.subplots(
         1,
@@ -532,14 +487,10 @@ def plot_average_time_slices(
     if len(time_slices) == 1:
         axs = [axs]
 
-    fig.suptitle(
-        "Average 1D String Configuration Across Seeds",
-        fontsize=16,
-        fontweight="bold",
-    )
+    fig.suptitle(title, fontsize=16, fontweight="bold")
 
     for idx, step in enumerate(time_slices):
-        if step >= u_true.shape[1] or step >= u_gp_mean.shape[1]:
+        if step >= u_true.shape[1] or step >= u_pred.shape[1]:
             print(f"[WARNING] Time step {step} is out of bounds.")
             continue
 
@@ -555,20 +506,11 @@ def plot_average_time_slices(
 
         axs[idx].plot(
             z,
-            u_gp_mean[:, step],
+            u_pred[:, step],
             "r--",
             linewidth=2.5,
-            label=f"Mean GP-PHS Prediction ({legend_tag})",
+            label=f"{pred_label_prefix} ({legend_tag})",
         )
-
-        if show_std_band:
-            axs[idx].fill_between(
-                z,
-                u_gp_lower[:, step],
-                u_gp_upper[:, step],
-                alpha=0.2,
-                label=r"$\pm 1\sigma$ across seeds",
-            )
 
         axs[idx].set_title(f"Time Step = {step} ({time_val:.2f}s)", fontsize=12)
         axs[idx].set_xlabel("Spatial Coordinate (z)", fontsize=10)
@@ -580,10 +522,13 @@ def plot_average_time_slices(
         axs[idx].legend(loc="upper right")
 
     plt.tight_layout(rect=(0, 0, 1, 0.93))
-    plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.close()
 
-    print(f"[SUCCESS] Average rollout time-slice plot saved as '{save_path}'")
+    if save_path is not None:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"[SUCCESS] Rollout time-slice plot saved as '{save_path}'")
+    else:
+        plt.show()
 
 
 def spatial_derivative_centered(f, dz, boundary_value=np.nan):

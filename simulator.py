@@ -7,32 +7,89 @@ def periodic_stiffness(num_hinges, length, z_arr):
     return 10.0 + 4.0 * np.cos(2 * hinge_freq * z_arr)
 
 
-def c2_less_smooth_stiffness(num_bumps, length, z_arr, base=10.0, amp=4.0, radius=None):
+# def c2_less_smooth_stiffness(num_bumps, length, z_arr, base=10.0, amp=4.0, radius=None):
+#     """
+#     Less-smooth but still C^2 stiffness profile using compactly supported
+#     Wendland C^2 basis functions.
+#
+#     Regularity: C^2, but generally not C^3.
+#     Useful for testing Matérn kernels with finite smoothness assumptions.
+#
+#     k(z) = base + amp * normalized_sum_of_C2_bumps(z)
+#     """
+#     z_arr = np.asarray(z_arr)
+#
+#     if radius is None:
+#         radius = 0.5 * length / num_bumps
+#
+#     centers = np.linspace(0.1 * length, 0.9 * length, num_bumps)
+#
+#     # Alternating bump amplitudes to create spatial heterogeneity.
+#     weights = np.array([(-1.0) ** i for i in range(num_bumps)])
+#
+#     profile = np.zeros_like(z_arr, dtype=float)
+#
+#     for center, weight in zip(centers, weights):
+#         r = np.abs(z_arr - center) / radius
+#
+#         # Wendland C^2 function in 1D:
+#         # phi(r) = (1-r)^4_+ (4r+1)
+#         phi = np.where(
+#             r < 1.0,
+#             (1.0 - r) ** 4 * (4.0 * r + 1.0),
+#             0.0,
+#         )
+#
+#         profile += weight * phi
+#
+#     # Normalize to roughly [-1, 1] before scaling.
+#     max_abs = np.max(np.abs(profile))
+#     if max_abs > 1e-12:
+#         profile = profile / max_abs
+#
+#     return base + amp * profile
+
+
+def c2_multiscale_stiffness(
+    num_bumps,
+    length,
+    z_arr,
+    k_min=5.0,
+    k_max=18.0,
+    seed=42,
+    min_radius_frac=0.035,
+    max_radius_frac=0.12,
+):
     """
-    Less-smooth but still C^2 stiffness profile using compactly supported
-    Wendland C^2 basis functions.
+    Rough but C^2 stiffness profile using compactly supported Wendland C^2 bumps.
 
-    Regularity: C^2, but generally not C^3.
-    Useful for testing Matérn kernels with finite smoothness assumptions.
+    Regularity:
+        C^2, but not generally C^3.
 
-    k(z) = base + amp * normalized_sum_of_C2_bumps(z)
+    Why this is harder than the previous version:
+        - more bumps,
+        - random centers,
+        - multiple spatial scales,
+        - variation distributed across the full domain,
+        - rescaled to a fixed positive stiffness range [k_min, k_max].
     """
     z_arr = np.asarray(z_arr)
+    rng = np.random.default_rng(seed)
 
-    if radius is None:
-        radius = 0.5 * length / num_bumps
-
-    centers = np.linspace(0.1 * length, 0.9 * length, num_bumps)
-
-    # Alternating bump amplitudes to create spatial heterogeneity.
-    weights = np.array([(-1.0) ** i for i in range(num_bumps)])
+    centers = rng.uniform(0.0, length, size=num_bumps)
+    radii = rng.uniform(
+        min_radius_frac * length,
+        max_radius_frac * length,
+        size=num_bumps,
+    )
+    weights = rng.normal(loc=0.0, scale=1.0, size=num_bumps)
 
     profile = np.zeros_like(z_arr, dtype=float)
 
-    for center, weight in zip(centers, weights):
+    for center, radius, weight in zip(centers, radii, weights):
         r = np.abs(z_arr - center) / radius
 
-        # Wendland C^2 function in 1D:
+        # Wendland C^2:
         # phi(r) = (1-r)^4_+ (4r+1)
         phi = np.where(
             r < 1.0,
@@ -42,12 +99,21 @@ def c2_less_smooth_stiffness(num_bumps, length, z_arr, base=10.0, amp=4.0, radiu
 
         profile += weight * phi
 
-    # Normalize to roughly [-1, 1] before scaling.
-    max_abs = np.max(np.abs(profile))
-    if max_abs > 1e-12:
-        profile = profile / max_abs
+    # Add a mild low-frequency component so the whole domain is affected.
+    profile += 0.5 * np.sin(2.0 * np.pi * z_arr / length)
+    profile += 0.3 * np.cos(4.0 * np.pi * z_arr / length)
 
-    return base + amp * profile
+    # Rescale to [k_min, k_max].
+    p_min = np.min(profile)
+    p_max = np.max(profile)
+
+    if p_max - p_min < 1e-12:
+        return np.full_like(z_arr, 0.5 * (k_min + k_max))
+
+    profile_01 = (profile - p_min) / (p_max - p_min)
+    stiffness = k_min + (k_max - k_min) * profile_01
+
+    return stiffness
 
 
 def piecewise_stiffness(num_segments, length, z_arr, values=None):
@@ -108,7 +174,7 @@ class SoftRodSimulator:
         if stiffness_profile == "periodic":
             self.stiffness = periodic_stiffness(num_hinges, L, self.z)
         elif stiffness_profile == "C2":
-            self.stiffness = c2_less_smooth_stiffness(num_hinges, L, self.z)
+            self.stiffness = c2_multiscale_stiffness(num_hinges, L, self.z)
         elif stiffness_profile == "piecewise":
             self.stiffness = piecewise_stiffness(num_hinges, L, self.z)
         elif stiffness_profile == "sharp":
