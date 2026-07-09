@@ -118,6 +118,30 @@ def random_z_indices(X, train_fraction, seed):
     return rng.choice(X.shape[0], size=num_train, replace=False)
 
 
+def normalize_changepoint_params(
+    init_location_phys,
+    init_width_phys,
+    X_mean,
+    X_std,
+    z_col=2,
+):
+    """
+    Convert physical changepoint location/width into normalized coordinates.
+
+    The GP kernel receives normalized inputs:
+        z_norm = (z_phys - z_mean) / z_std
+
+    So the changepoint parameters must also be expressed in normalized units.
+    """
+    z_mean = float(X_mean[z_col].detach().cpu().item())
+    z_std = float(X_std[z_col].detach().cpu().item()) + 1e-6
+
+    init_location_norm = (init_location_phys - z_mean) / z_std
+    init_width_norm = init_width_phys / z_std
+
+    return init_location_norm, init_width_norm
+
+
 def simulate_gp_phs(simulator, dEdp_model, dEdq_model, get_init_q_config):
     print("Executing GP-PHS trajectory rollout simulation...")
     q0 = get_init_q_config(simulator.z, simulator.L)

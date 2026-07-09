@@ -171,7 +171,7 @@ def piecewise_stiffness(
         )
 
     if values is None:
-        values = np.array([6.0, 14.0], dtype=float)
+        values = np.array([5.0, 15.0], dtype=float)
     else:
         values = np.asarray(values, dtype=float)
         if len(values) < 2:
@@ -187,7 +187,7 @@ def piecewise_stiffness(
         # Use about 5 grid spacings by default.
         # This keeps the step sharp but avoids a true discontinuity.
         dz = np.median(np.diff(np.sort(z_arr)))
-        transition_width = 5.0 * dz
+        transition_width = 2.0 * dz
 
     if transition_width <= 0:
         raise ValueError("transition_width must be positive.")

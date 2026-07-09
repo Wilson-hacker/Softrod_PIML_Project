@@ -1,4 +1,5 @@
 import os
+import copy
 import sys
 import numpy as np
 import torch
@@ -10,6 +11,7 @@ from model import train_gp_model
 from utils import (
     stratified_z_indices,
     random_z_indices,
+    normalize_changepoint_params,
     simulate_gp_phs,
     compute_effort_force_error_curves,
     compute_rollout_failure_stats,
@@ -148,12 +150,18 @@ def run_pipeline(
     y_q_mean, y_q_std = y_dEdq_train.mean(), y_dEdq_train.std()
     y_q_train_norm = (y_dEdq_train - y_q_mean) / (y_q_std + 1e-6)
 
+    param_dict_copy = copy.deepcopy(param_dict)
+    if kernel_type == "SD" and param_dict["spatial_kernel"] == "changepoint":
+        init_location_norm, init_width_norm = normalize_changepoint_params(
+            param_dict["changepoint_location"], param_dict["changepoint_width"], X_mean, X_std)
+        param_dict_copy["changepoint_location"], param_dict_copy["changepoint_width"] = init_location_norm, init_width_norm
+
     print("\n--- Step 2: Training GP-PHS Component Models ---")
 
     dEdp_model, dEdp_lh = train_gp_model(
         X_train_norm,
         y_p_train_norm,
-        param_dict,
+        param_dict_copy,
         kernel_type="baseline",
         training_iter=1000,
         patience=15,
@@ -163,7 +171,7 @@ def run_pipeline(
     dEdq_model, dEdq_lh = train_gp_model(
         X_train_norm,
         y_q_train_norm,
-        param_dict,
+        param_dict_copy,
         kernel_type=kernel_type,
         training_iter=1000,
         patience=15,
@@ -237,7 +245,7 @@ def run_pipeline(
         plot_effort_force_rmse_and_qmax_curves(
             curves=curves,
             title=f"Effort / Force Error and Strain Growth ({param_dict["stiffness_profile"]} stiffness, {title_tag}, seed={seed}))",
-            save_path=f"./plots/force_err_vs_t_{file_tag}_seed{seed}.png",
+            save_path=f"./plots/force_err(t)_{file_tag}_seed{seed}.png",
         )
 
         plot_force_field_error_heatmap(
@@ -415,7 +423,7 @@ def run_pipeline_multiple_seeds(
     # ------------------------------------------------------------
     if plot_average_rollout:
         save_path = (
-            f"./plots/average_string_slices_{file_tag}_nseeds{len(seeds)}.png"
+            f"./plots/avg_string_slices_{file_tag}.png"
             if save_average_plot
             else None
         )
@@ -433,7 +441,7 @@ def run_pipeline_multiple_seeds(
 
     if plot_average_error_curves:
         save_path = (
-            f"./plots/average_force_err_vs_t_{file_tag}_nseeds{len(seeds)}.png"
+            f"./plots/avg_force_err(t)_{file_tag}.png"
             if save_average_plot
             else None
         )
@@ -446,7 +454,7 @@ def run_pipeline_multiple_seeds(
 
     if plot_average_heatmap:
         save_path = (
-            f"./plots/average_force_field_err_{file_tag}_nseeds{len(seeds)}.png"
+            f"./plots/avg_force_field_err_{file_tag}.png"
             if save_average_plot
             else None
         )
@@ -566,7 +574,6 @@ def run_model_configurations_with_overlay(
         model_summaries:
             List used for overlaid rollout plotting.
     """
-    import copy
 
     results_by_label = {}
     metrics_table = []
@@ -617,11 +624,11 @@ def run_model_configurations_with_overlay(
             # Disable per-config plots here.
             # The wrapper will make one clean overlaid rollout plot.
             plot_average_rollout=False,
-            plot_average_error_curves=False,
-            plot_average_heatmap=False,
+            plot_average_error_curves=True,
+            plot_average_heatmap=True,
 
             time_slices=time_slices,
-            save_average_plot=False,
+            save_average_plot=True,
             q_growth_failure_threshold=q_growth_failure_threshold,
             edge=edge,
         )
@@ -748,18 +755,20 @@ if __name__ == '__main__':
     # ("C2", 8, "baseline", "rbf"), ("C2", 8, "SD", "rbf"), ("C2", 8, "SD", "matern")
     # ("piecewise", 2, "baseline", "rbf"), ("piecewise", 2, "SD", "rbf"),
     # ("piecewise", 2, "SD", "matern"), ("piecewise", 2, "SD", "changepoint")
-    test_config = [("C2", 8, "baseline", "rbf"), ("C2", 8, "SD", "rbf"), ("C2", 8, "SD", "matern")]
+    test_config = [("piecewise", 2, "baseline", "rbf"), ("piecewise", 2, "SD", "rbf"),
+                   ("piecewise", 2, "SD", "matern"), ("piecewise", 2, "SD", "changepoint")]
     param_dict = {
         "stiffness_profile": "piecewise",
         "num_hinges": 2,
         "strain_kernel": "rbf",
-        "spatial_kernel": "matern",
+        "spatial_kernel": "changepoint",
         "matern_nu": 2.5,
         "changepoint_location": 5.0,
-        "changepoint_width": 0.5,
+        "changepoint_width": 0.15,
         "n_freqs": 10
     }
-    run_model_configurations_with_overlay(param_dict, test_config, seeds=(6, 42, 79, 123, 456), sampling="stratified", train_sample_fraction=0.06)
+    run_model_configurations_with_overlay(param_dict, test_config, seeds=(6, 42, 79, 123, 456),
+                                          sampling="stratified", train_sample_fraction=0.04)
     # metrics_table = []
     # for stif_profile, num_hinges, kernel, spatial_kernel in test_config:
     #     print(f"CONFIG: {stif_profile} stiffness profile, {num_hinges} bumps/hinges, {kernel} kernel, {spatial_kernel} spatial kernel")
@@ -777,5 +786,6 @@ if __name__ == '__main__':
 
     # run_pipeline_multiple_seeds(param_dict, seeds=(6, 42, 79, 123, 456), kernel_type="baseline",
     #                             sampling="stratified", train_sample_fraction=0.06)
-    # run_pipeline(param_dict, kernel_type="SD", sampling="stratified", seed=42, verbose=True, make_plots=True)
+    # run_pipeline(param_dict, kernel_type="SD", sampling="stratified", seed=79,
+    #              train_sample_fraction=0.04, verbose=True, make_plots=True)
     # run_diagnostic(param_dict)
