@@ -2,6 +2,10 @@ import numpy as np
 from scipy.integrate import solve_ivp
 
 
+def const_stiffness(z_arr):
+    return np.ones_like(z_arr) * 10.0
+
+
 def periodic_stiffness(num_hinges, length, z_arr):
     hinge_freq = num_hinges * np.pi / length
     return 10.0 + 4.0 * np.cos(2 * hinge_freq * z_arr)
@@ -116,30 +120,97 @@ def c2_multiscale_stiffness(
     return stiffness
 
 
-def piecewise_stiffness(num_segments, length, z_arr, values=None):
+def piecewise_stiffness(
+    num_segments,
+    length,
+    z_arr,
+    values=None,
+    transition_center=None,
+    transition_width=None,
+    smoothness="C2",
+):
     """
-    Piecewise-constant stiffness profile.
+    Smoothed piecewise stiffness profile with one sharp transition.
 
-    Regularity: discontinuous at segment boundaries.
-    Useful for testing changepoint or piecewise kernels.
+    Regularity:
+        smoothness="C1": cubic smoothstep transition
+        smoothness="C2": quintic smootherstep transition
+
+    This is a step-like profile, but the discontinuity is replaced by a finite-width
+    smooth transition. This is safer for finite-difference PDE simulation than a
+    truly discontinuous stiffness jump.
+
+    Args:
+        num_segments:
+            Kept for compatibility with the old function. For the current
+            changepoint-kernel experiments, use num_segments=2.
+        length:
+            Domain length.
+        z_arr:
+            Spatial grid array.
+        values:
+            Two stiffness values [left_value, right_value].
+            If None, defaults to [6.0, 14.0].
+        transition_center:
+            Center of the transition. If None, uses length / 2.
+        transition_width:
+            Width of the smooth transition region. If None, uses 5 grid spacings.
+        smoothness:
+            "C1" or "C2".
+
+    Returns:
+        k(z): array with same shape as z_arr.
     """
-    z_arr = np.asarray(z_arr)
+
+    z_arr = np.asarray(z_arr, dtype=float)
+
+    if num_segments != 2:
+        print(
+            "[WARNING] This smoothed piecewise profile currently uses one transition. "
+            "Only the first two stiffness values are used."
+        )
 
     if values is None:
-        # Deterministic alternating stiffness values.
-        base_values = np.array([6.0, 14.0, 8.0, 12.0])
-        values = np.resize(base_values, num_segments)
+        values = np.array([6.0, 14.0], dtype=float)
     else:
         values = np.asarray(values, dtype=float)
-        if len(values) != num_segments:
-            raise ValueError("Length of values must match num_segments.")
+        if len(values) < 2:
+            raise ValueError("values must contain at least two stiffness values.")
 
-    edges = np.linspace(0.0, length, num_segments + 1)
+    k_left = values[0]
+    k_right = values[1]
 
-    # idx tells which segment each z belongs to.
-    idx = np.digitize(z_arr, edges[1:-1], right=False)
+    if transition_center is None:
+        transition_center = 0.5 * length
 
-    return values[idx]
+    if transition_width is None:
+        # Use about 5 grid spacings by default.
+        # This keeps the step sharp but avoids a true discontinuity.
+        dz = np.median(np.diff(np.sort(z_arr)))
+        transition_width = 5.0 * dz
+
+    if transition_width <= 0:
+        raise ValueError("transition_width must be positive.")
+
+    z_start = transition_center - 0.5 * transition_width
+    z_end = transition_center + 0.5 * transition_width
+
+    # Normalized transition coordinate.
+    s = (z_arr - z_start) / (z_end - z_start)
+    s = np.clip(s, 0.0, 1.0)
+
+    if smoothness.upper() == "C1":
+        # Cubic smoothstep: C1 continuous.
+        weight = 3.0 * s**2 - 2.0 * s**3
+
+    elif smoothness.upper() == "C2":
+        # Quintic smootherstep: C2 continuous.
+        weight = 6.0 * s**5 - 15.0 * s**4 + 10.0 * s**3
+
+    else:
+        raise ValueError("smoothness must be either 'C1' or 'C2'.")
+
+    return k_left + (k_right - k_left) * weight
 
 
 def sharp_transition_stiffness(length, z_arr, low=6.0, high=14.0, center=None, width=0.1):
@@ -173,6 +244,8 @@ class SoftRodSimulator:
         # Geometry: varying stiffness k(z) for "thin hinges"
         if stiffness_profile == "periodic":
             self.stiffness = periodic_stiffness(num_hinges, L, self.z)
+        elif stiffness_profile == "constant":
+            self.stiffness = const_stiffness(self.z)
         elif stiffness_profile == "C2":
             self.stiffness = c2_multiscale_stiffness(num_hinges, L, self.z)
         elif stiffness_profile == "piecewise":

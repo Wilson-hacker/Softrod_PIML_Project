@@ -18,7 +18,8 @@ from utils import (
     evaluate_gp_phs_model,
     print_metrics_report,
     plot_effort_force_rmse_and_qmax_curves,
-    plot_force_field_error_heatmap
+    plot_force_field_error_heatmap,
+    plot_overlaid_average_rollout_time_slices
 )
 from diagnostic import (stiffness_activity_diagnostic,
                         plot_q_dHdq_force_diagnostic,
@@ -44,7 +45,9 @@ def get_file_tag(kernel_type, param_dict):
 
 def get_caption_tag(kernel_type, param_dict):
     if kernel_type == "SD":
-        return f"SD [{param_dict["strain_kernel"]}+{param_dict["spatial_kernel"]}]"
+        spatial_kernel_str = fr"{param_dict["spatial_kernel"]} $\nu={param_dict["matern_nu"]:.1f}$" \
+            if param_dict["spatial_kernel"] == "matern" else param_dict["spatial_kernel"]
+        return f"SD-{spatial_kernel_str}"
     elif kernel_type == "baseline" or kernel_type == "warped":
         return kernel_type
     else:
@@ -63,6 +66,21 @@ def extract_selected_metrics(metrics):
         "dHdq_rmse": metrics["calibration"]["dHdq"]["rmse"],
         "dHdq_force_rmse": metrics["calibration"]["dHdq_force"]["dHdq_force_rmse"],
     }
+
+
+def print_metrics_table(metrics_table):
+    print(f"{'Trial num.':>10} | {'q_rel_l2':>8} | {'u_rel_l2':>8} | {'E_rel_l2':>8} | {'curl_rms':>8} | {'dHdq_rmse':>9} | {'force_rmse':>10} | {'%fail.':>8} | {'max_q_ratio':>11}")
+    print("-" * 110)
+    for i, metric in enumerate(metrics_table):
+        print(f"{i:>10d} | "
+              f"{metric[0]:>8.2e} | "
+              f"{metric[1]:>8.2e} | "
+              f"{metric[2]:>8.2e} | "
+              f"{metric[3]:>8.2e} | "
+              f"{metric[4]:>9.2e} | "
+              f"{metric[5]:>10.2e} | "
+              f"{metric[6]:>8.2e} | "
+              f"{metric[7]:>11.2e}")
 
 
 def run_pipeline(
@@ -497,6 +515,172 @@ def run_pipeline_multiple_seeds(
     return summary
 
 
+def run_model_configurations_with_overlay(
+    param_dict,
+    test_config,
+    seeds=(6, 42, 79, 123, 456),
+    sampling="stratified",
+    train_sample_fraction=0.06,
+    time_slices=(0, 50, 100),
+    q_growth_failure_threshold=3.0,
+    edge=5,
+    save_overlay_path=None,
+    plot_overlay=True,
+):
+    """
+    Runs run_pipeline_multiple_seeds() across several model configurations,
+    collects averaged metrics, and plots overlaid averaged rollout trajectories.
+
+    Args:
+        param_dict:
+            Base parameter dictionary. This function copies it for each config.
+        test_config:
+            Iterable of tuples:
+                (stif_profile, num_hinges, kernel, spatial_kernel)
+        seeds:
+            Random seeds for each model configuration.
+        sampling:
+            Sampling method passed to run_pipeline_multiple_seeds().
+        train_sample_fraction:
+            Training fraction passed to run_pipeline_multiple_seeds().
+        time_slices:
+            Time slices for the overlaid rollout plot.
+        q_growth_failure_threshold:
+            Failure threshold used in run_pipeline_multiple_seeds().
+        edge:
+            Interior exclusion region for diagnostics.
+        save_overlay_path:
+            Path for the overlaid rollout plot.
+        plot_overlay:
+            If True, creates the overlaid rollout plot.
+        print_table_fn:
+            Optional function, e.g. print_metrics_table.
+
+    Returns:
+        results_by_label:
+            Dictionary mapping short labels to multi-seed summaries.
+
+        metrics_table:
+            List of metric rows.
+
+        model_summaries:
+            List used for overlaid rollout plotting.
+    """
+    import copy
+
+    results_by_label = {}
+    metrics_table = []
+    model_summaries = []
+
+    metric_keys = [
+        "q_rel_l2",
+        "u_rel_l2",
+        "energy_rel_l2",
+        "curl_rms",
+        "dHdq_rmse",
+        "dHdq_force_rmse",
+    ]
+
+    ref_test_data = None
+    ref_simulator = None
+    stiffness_profile_for_title = None
+
+    for config in test_config:
+        stif_profile, num_hinges, kernel, spatial_kernel = config
+
+        # Avoid mutating the original param_dict across configurations.
+        config_param_dict = copy.deepcopy(param_dict)
+        config_param_dict["stiffness_profile"] = stif_profile
+        config_param_dict["num_hinges"] = num_hinges
+        config_param_dict["spatial_kernel"] = spatial_kernel
+
+        label = get_caption_tag(kernel, config_param_dict)
+
+        print("\n" + "#" * 90)
+        print(
+            f"CONFIG: {stif_profile} stiffness, "
+            f"num_hinges={num_hinges}, "
+            f"kernel={kernel}, "
+            f"spatial_kernel={spatial_kernel}, "
+            f"label={label}"
+        )
+        print("#" * 90)
+
+        results = run_pipeline_multiple_seeds(
+            param_dict=config_param_dict,
+            seeds=seeds,
+            kernel_type=kernel,
+            train_sample_fraction=train_sample_fraction,
+            sampling=sampling,
+            make_individual_plots=False,
+
+            # Disable per-config plots here.
+            # The wrapper will make one clean overlaid rollout plot.
+            plot_average_rollout=False,
+            plot_average_error_curves=False,
+            plot_average_heatmap=False,
+
+            time_slices=time_slices,
+            save_average_plot=False,
+            q_growth_failure_threshold=q_growth_failure_threshold,
+            edge=edge,
+        )
+
+        results_by_label[label] = results
+
+        # --------------------------------------------------------
+        # Store metric row
+        # --------------------------------------------------------
+        metric_row = [results["avg_metrics"][key] for key in metric_keys]
+        metric_row.append(results["failure_stats"]["failure_rate"])
+        metric_row.append(results["failure_stats"]["q_growth_ratio_mean"])
+
+        metrics_table.append(metric_row)
+
+        # --------------------------------------------------------
+        # Store model summary for overlay plot
+        # --------------------------------------------------------
+        model_summaries.append(
+            {
+                "label": label,
+                "q_gp_mean": results["q_gp_mean"],
+                "avg_metrics": results["avg_metrics"],
+                "failure_stats": results["failure_stats"],
+            }
+        )
+
+        # Reference simulator/test data should be identical across configs
+        # for a fixed stiffness profile. Use first config as reference.
+        if ref_test_data is None:
+            ref_test_data = results["all_outputs"][0]["test_data"]
+            ref_simulator = results["all_outputs"][0]["simulator"]
+            stiffness_profile_for_title = stif_profile
+
+    print_metrics_table(metrics_table)
+
+    # ------------------------------------------------------------
+    # Overlaid rollout plot
+    # ------------------------------------------------------------
+    if plot_overlay:
+        if save_overlay_path is None:
+            save_overlay_path = (
+                f"./plots/overlay_rollout_{stiffness_profile_for_title}_"
+                f"nmodels{len(model_summaries)}_nseeds{len(seeds)}.png"
+            )
+
+        plot_overlaid_average_rollout_time_slices(
+            data=ref_test_data,
+            model_summaries=model_summaries,
+            simulator=ref_simulator,
+            time_slices=time_slices,
+            save_path=save_overlay_path,
+            title=f"Average Rollout Comparison ({stiffness_profile_for_title} stiffness)",
+            legend_ncol=min(4, len(model_summaries) + 1),
+        )
+
+    return results_by_label, metrics_table, model_summaries
+
+
 def run_diagnostic(param_dict, kernel_type="baseline"):
     sim = SoftRodSimulator(L=10.0, N=60, T=5.5, dt=0.05, num_hinges=param_dict["num_hinges"],
                            stiffness_profile=param_dict["stiffness_profile"])
@@ -561,23 +745,37 @@ def run_diagnostic(param_dict, kernel_type="baseline"):
 if __name__ == '__main__':
     # ("periodic", 4, "SD", "rbf"), ("periodic", 4, "SD", "periodic"),
     # ("periodic", 4, "SD", "warped"), ("periodic", 4, "warped", "rbf")
+    # ("C2", 8, "baseline", "rbf"), ("C2", 8, "SD", "rbf"), ("C2", 8, "SD", "matern")
+    # ("piecewise", 2, "baseline", "rbf"), ("piecewise", 2, "SD", "rbf"),
+    # ("piecewise", 2, "SD", "matern"), ("piecewise", 2, "SD", "changepoint")
     test_config = [("C2", 8, "baseline", "rbf"), ("C2", 8, "SD", "rbf"), ("C2", 8, "SD", "matern")]
     param_dict = {
-        "stiffness_profile": "C2",
-        "num_hinges": 8,
+        "stiffness_profile": "piecewise",
+        "num_hinges": 2,
         "strain_kernel": "rbf",
-        "spatial_kernel": "rbf",
+        "spatial_kernel": "matern",
         "matern_nu": 2.5,
         "changepoint_location": 5.0,
         "changepoint_width": 0.5,
         "n_freqs": 10
     }
-    for stif_profile, num_hinges, kernel, spatial_kernel in test_config:
-        print(f"CONFIG: {stif_profile} stiffness profile, {num_hinges} bumps/hinges, {kernel} kernel, {spatial_kernel} spatial kernel")
-        param_dict["stiffness_profile"] = stif_profile
-        param_dict["num_hinges"] = num_hinges
-        param_dict["spatial_kernel"] = spatial_kernel
-        run_pipeline_multiple_seeds(param_dict, seeds=(6, 42, 79, 123, 456), kernel_type=kernel,
-                                sampling="stratified", train_sample_fraction=0.06)
+    run_model_configurations_with_overlay(param_dict, test_config, seeds=(6, 42, 79, 123, 456), sampling="stratified", train_sample_fraction=0.06)
+    # metrics_table = []
+    # for stif_profile, num_hinges, kernel, spatial_kernel in test_config:
+    #     print(f"CONFIG: {stif_profile} stiffness profile, {num_hinges} bumps/hinges, {kernel} kernel, {spatial_kernel} spatial kernel")
+    #     param_dict["stiffness_profile"] = stif_profile
+    #     param_dict["num_hinges"] = num_hinges
+    #     param_dict["spatial_kernel"] = spatial_kernel
+    #     results = run_pipeline_multiple_seeds(param_dict, seeds=(6, 42, 79, 123, 456), kernel_type=kernel,
+    #                             sampling="stratified", train_sample_fraction=0.06)
+    #     metric_summary = [results["avg_metrics"][key] for key in results["avg_metrics"]]
+    #     metric_summary.append(results["failure_stats"]["failure_rate"])
+    #     metric_summary.append(results["failure_stats"]["q_growth_ratio_mean"])
+    #     metrics_table.append(metric_summary)
+    #
+    # print_metrics_table(metrics_table)
+
+    # run_pipeline_multiple_seeds(param_dict, seeds=(6, 42, 79, 123, 456), kernel_type="baseline",
+    #                             sampling="stratified", train_sample_fraction=0.06)
     # run_pipeline(param_dict, kernel_type="SD", sampling="stratified", seed=42, verbose=True, make_plots=True)
     # run_diagnostic(param_dict)

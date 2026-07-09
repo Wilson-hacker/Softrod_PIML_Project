@@ -464,7 +464,7 @@ def plot_rollout_time_slices(
     save_path=None,
     legend_tag="GP-PHS",
     title="1D String Configuration",
-    pred_label_prefix="GP-PHS Prediction",
+    pred_label_prefix="GP Pred.",
 ):
     """
     Plots displacement u(z,t) time slices.
@@ -501,7 +501,7 @@ def plot_rollout_time_slices(
             u_true[:, step],
             "k-",
             linewidth=2.5,
-            label="True Numerical PDE",
+            label="Ground Truth",
         )
 
         axs[idx].plot(
@@ -527,6 +527,131 @@ def plot_rollout_time_slices(
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.close()
         print(f"[SUCCESS] Rollout time-slice plot saved as '{save_path}'")
+    else:
+        plt.show()
+
+
+def plot_overlaid_average_rollout_time_slices(
+    data,
+    model_summaries,
+    simulator,
+    time_slices=(0, 50, 100),
+    save_path=None,
+    title="Average Rollout Comparison",
+    legend_ncol=3,
+):
+    """
+    Overlay averaged rollout trajectories from multiple model configurations.
+
+    Args:
+        data:
+            True test data dictionary containing data["q"].
+        model_summaries:
+            List of dictionaries. Each dictionary should contain:
+                {
+                    "label": short label for legend,
+                    "q_gp_mean": mean GP rollout strain, shape [N_z, N_t]
+                }
+        simulator:
+            Simulator object.
+        time_slices:
+            Time steps to plot.
+        save_path:
+            If provided, saves the figure. Otherwise displays it.
+        title:
+            Figure title.
+        legend_ncol:
+            Number of legend columns.
+    """
+
+    q_true = data["q"]
+    z = simulator.z
+    dz = simulator.dz
+
+    u_true = np.cumsum(q_true, axis=0) * dz
+
+    fig, axs = plt.subplots(
+        1,
+        len(time_slices),
+        figsize=(6 * len(time_slices), 4.8),
+        sharey=True,
+    )
+
+    if len(time_slices) == 1:
+        axs = [axs]
+
+    fig.suptitle(title, fontsize=15, fontweight="bold")
+
+    handles = []
+    labels = []
+
+    for ax_idx, step in enumerate(time_slices):
+        ax = axs[ax_idx]
+
+        if step >= u_true.shape[1]:
+            print(f"[WARNING] Time step {step} is out of bounds.")
+            continue
+
+        time_val = step * simulator.dt
+
+        true_line, = ax.plot(
+            z,
+            u_true[:, step],
+            linewidth=2.5,
+            linestyle="-",
+            label="Ground Truth",
+        )
+
+        if ax_idx == 0:
+            handles.append(true_line)
+            labels.append("Ground Truth")
+
+        for model in model_summaries:
+            label = model["label"]
+            q_mean = model["q_gp_mean"]
+
+            if step >= q_mean.shape[1]:
+                print(f"[WARNING] Time step {step} is out of bounds for model {label}.")
+                continue
+
+            u_mean = np.cumsum(q_mean, axis=0) * dz
+
+            line, = ax.plot(
+                z,
+                u_mean[:, step],
+                linewidth=2.0,
+                linestyle="--",
+                label=label,
+            )
+
+            if ax_idx == 0:
+                handles.append(line)
+                labels.append(label)
+
+        ax.set_title(f"Step {step} ({time_val:.2f}s)", fontsize=11)
+        ax.set_xlabel("z")
+        ax.grid(True, linestyle=":", alpha=0.6)
+
+        if ax_idx == 0:
+            ax.set_ylabel("Displacement u")
+
+    # One shared legend, not repeated in every subplot.
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        ncol=legend_ncol,
+        frameon=True,
+        fontsize=9,
+        bbox_to_anchor=(0.5, -0.02),
+    )
+
+    plt.tight_layout(rect=(0, 0.08, 1, 0.93))
+
+    if save_path is not None:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"[SUCCESS] Overlaid rollout plot saved as '{save_path}'")
     else:
         plt.show()
 
