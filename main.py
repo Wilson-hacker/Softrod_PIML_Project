@@ -3,6 +3,8 @@ import copy
 import sys
 import numpy as np
 import torch
+import pickle
+from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -21,7 +23,8 @@ from utils import (
     print_metrics_report,
     plot_effort_force_rmse_and_qmax_curves,
     plot_force_field_error_heatmap,
-    plot_overlaid_average_rollout_time_slices
+    plot_overlaid_average_rollout_time_slices,
+    plot_multi_profile_rollout_grid
 )
 from diagnostic import (stiffness_activity_diagnostic,
                         plot_q_dHdq_force_diagnostic,
@@ -68,6 +71,53 @@ def extract_selected_metrics(metrics):
         "dHdq_rmse": metrics["calibration"]["dHdq"]["rmse"],
         "dHdq_force_rmse": metrics["calibration"]["dHdq_force"]["dHdq_force_rmse"],
     }
+
+
+def _save_pickle_atomic(data, save_path):
+    """
+    Save a Python object atomically.
+
+    The temporary file is replaced only after serialization succeeds,
+    reducing the risk of leaving a corrupted result file.
+    """
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = save_path.with_suffix(
+        save_path.suffix + ".tmp"
+    )
+
+    with temporary_path.open("wb") as file:
+        pickle.dump(
+            data,
+            file,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+
+    temporary_path.replace(save_path)
+
+
+def load_rollout_plot_data(save_path):
+    """
+    Load a rollout plotting artifact created by
+    run_all_profiles_with_rollout_grid().
+
+    Only load pickle files that you created or trust.
+    """
+    save_path = Path(save_path)
+
+    with save_path.open("rb") as file:
+        plot_artifact = pickle.load(file)
+
+    expected_version = 1
+
+    if plot_artifact.get("schema_version") != expected_version:
+        raise ValueError(
+            "Unsupported rollout artifact version: "
+            f"{plot_artifact.get('schema_version')}."
+        )
+
+    return plot_artifact
 
 
 def print_metrics_table(metrics_table):
@@ -293,6 +343,7 @@ def run_pipeline_multiple_seeds(
     save_average_plot=True,
     q_growth_failure_threshold=3.0,
     edge=5,
+    add_plt_title=True,
 ):
     """
     Runs run_pipeline() for multiple random seeds, averages selected metrics,
@@ -446,9 +497,11 @@ def run_pipeline_multiple_seeds(
             else None
         )
 
+        avg_err_plt_title = f"Average Effort / Force Error and Strain Growth ({param_dict["stiffness_profile"]} stiffness, {title_tag})" \
+            if add_plt_title else None
         plot_effort_force_rmse_and_qmax_curves(
             curves=avg_curves,
-            title=f"Average Effort / Force Error and Strain Growth ({param_dict["stiffness_profile"]} stiffness, {title_tag})",
+            title=avg_err_plt_title,
             save_path=save_path,
         )
 
@@ -459,13 +512,15 @@ def run_pipeline_multiple_seeds(
             else None
         )
 
+        heatmap_title = fr"Mean Force-Field Error: $|\Delta \partial_z(\partial_q H)|$ ({param_dict["stiffness_profile"]} stiffness, {title_tag})" \
+            if add_plt_title else None
         plot_force_field_error_heatmap(
             simulator=sim,
             data=test_data,
             force_error_abs=force_error_abs_mean,
             edge=edge,
             log_scale=False,
-            title=fr"Mean Force-Field Error: $|\Delta \partial_z(\partial_q H)|$ ({param_dict["stiffness_profile"]} stiffness, {title_tag})",
+            title=heatmap_title,
             save_path=save_path,
         )
 
@@ -534,6 +589,7 @@ def run_model_configurations_with_overlay(
     edge=5,
     save_overlay_path=None,
     plot_overlay=True,
+    add_plt_title=True
 ):
     """
     Runs run_pipeline_multiple_seeds() across several model configurations,
@@ -631,6 +687,7 @@ def run_model_configurations_with_overlay(
             save_average_plot=True,
             q_growth_failure_threshold=q_growth_failure_threshold,
             edge=edge,
+            add_plt_title=add_plt_title,
         )
 
         results_by_label[label] = results
@@ -675,17 +732,439 @@ def run_model_configurations_with_overlay(
                 f"nmodels{len(model_summaries)}_nseeds{len(seeds)}.png"
             )
 
+        rollout_title = f"Average Rollout Comparison ({stiffness_profile_for_title} stiffness)" if add_plt_title else None
         plot_overlaid_average_rollout_time_slices(
             data=ref_test_data,
             model_summaries=model_summaries,
             simulator=ref_simulator,
             time_slices=time_slices,
             save_path=save_overlay_path,
-            title=f"Average Rollout Comparison ({stiffness_profile_for_title} stiffness)",
-            legend_ncol=min(4, len(model_summaries) + 1),
+            title=rollout_title,
+            legend_ncol=max(4, len(model_summaries) + 1),
         )
 
     return results_by_label, metrics_table, model_summaries
+
+
+def run_all_profiles_with_rollout_grid(
+    param_dict,
+    profile_configs,
+    seeds=(6, 42, 79, 123, 456),
+    sampling="stratified",
+    time_slices=(0, 50, 100),
+    q_growth_failure_threshold=3.0,
+    edge=5,
+    save_plot_data_path="./plots/all_profiles_rollout_data.pkl",
+    baseline_kernel_type="baseline",
+    sd_kernel_type="SD",
+):
+    """
+    Compute multi-seed rollout results for all stiffness profiles and save
+    the information required for later plotting.
+
+    This function does not generate any figures.
+
+    Each profile configuration must contain:
+
+        {
+            "stiffness_profile": "periodic",
+            "row_label": "Periodic",
+            "num_hinges": 4,
+            "matched_spatial_kernel": "periodic",
+            "train_sample_fraction": 0.06,
+        }
+
+    Optional profile-specific model parameters can be supplied through:
+
+        "extra_params": {
+            ...
+        }
+
+    Parameters
+    ----------
+    param_dict:
+        Base simulation and model parameter dictionary.
+
+    profile_configs:
+        Ordered list of profile configuration dictionaries.
+
+    seeds:
+        Sampling seeds used for every model configuration.
+
+    sampling:
+        Sampling strategy passed to run_pipeline_multiple_seeds().
+
+    time_slices:
+        Default time steps to show when the saved artifact is plotted.
+
+    q_growth_failure_threshold:
+        Threshold used to classify rollout failures.
+
+    edge:
+        Boundary exclusion size used by diagnostic calculations.
+
+    save_plot_data_path:
+        Path of the serialized plotting artifact.
+
+    baseline_kernel_type:
+        Identifier used for the baseline model.
+
+    sd_kernel_type:
+        Identifier used for the structural-decoupling models.
+
+    Returns
+    -------
+    combined_results:
+        Full in-memory results returned by run_pipeline_multiple_seeds().
+        These results are not serialized because they may contain model
+        objects or other nonportable data.
+
+    plot_artifact:
+        Self-contained dictionary containing trajectories, metadata,
+        and metrics needed for plotting and result-table construction.
+
+    metrics_rows:
+        Flat list of metric dictionaries.
+    """
+    combined_results = {}
+    profile_plot_data = []
+    metrics_rows = []
+
+    plot_artifact = {
+        "schema_version": 1,
+        "metadata": {
+            "seeds": tuple(seeds),
+            "sampling": sampling,
+            "time_slices": tuple(time_slices),
+            "q_growth_failure_threshold": (
+                q_growth_failure_threshold
+            ),
+            "edge": edge,
+        },
+        "profiles": profile_plot_data,
+        "metrics_rows": metrics_rows,
+    }
+
+    for profile_config in profile_configs:
+        required_keys = (
+            "stiffness_profile",
+            "row_label",
+            "num_hinges",
+            "matched_spatial_kernel",
+            "train_sample_fraction",
+        )
+
+        missing_keys = [
+            key
+            for key in required_keys
+            if key not in profile_config
+        ]
+
+        if missing_keys:
+            raise KeyError(
+                "Profile configuration is missing required keys: "
+                f"{missing_keys}"
+            )
+
+        stiffness_profile = profile_config[
+            "stiffness_profile"
+        ]
+        row_label = profile_config["row_label"]
+        num_hinges = profile_config["num_hinges"]
+        matched_kernel = profile_config[
+            "matched_spatial_kernel"
+        ]
+        profile_train_fraction = profile_config[
+            "train_sample_fraction"
+        ]
+
+        if not 0.0 < profile_train_fraction <= 1.0:
+            raise ValueError(
+                "train_sample_fraction must lie in (0, 1], "
+                f"but received {profile_train_fraction} for "
+                f"'{stiffness_profile}'."
+            )
+
+        print("\n" + "=" * 100)
+        print(f"STIFFNESS PROFILE: {stiffness_profile}")
+        print(
+            "TRAINING FRACTION: "
+            f"{profile_train_fraction:.4f}"
+        )
+        print("=" * 100)
+
+        model_configs = [
+            {
+                "label": "Baseline",
+                "kernel_type": baseline_kernel_type,
+                "spatial_kernel": "rbf",
+            },
+            {
+                "label": "SD-RBF",
+                "kernel_type": sd_kernel_type,
+                "spatial_kernel": "rbf",
+            },
+            {
+                "label": "SD-matched",
+                "kernel_type": sd_kernel_type,
+                "spatial_kernel": matched_kernel,
+            },
+        ]
+
+        profile_model_results = {}
+        profile_models_for_plot = []
+
+        reference_z = None
+        reference_dz = None
+        reference_dt = None
+        reference_q_true = None
+        reference_u_true = None
+
+        for model_config in model_configs:
+            label = model_config["label"]
+            kernel_type = model_config["kernel_type"]
+            spatial_kernel = model_config[
+                "spatial_kernel"
+            ]
+
+            print("\n" + "#" * 80)
+            print(
+                f"{row_label}: "
+                f"{label}, "
+                f"kernel_type={kernel_type}, "
+                f"spatial_kernel={spatial_kernel}, "
+                f"train_sample_fraction="
+                f"{profile_train_fraction}"
+            )
+            print("#" * 80)
+
+            config_param_dict = copy.deepcopy(param_dict)
+
+            config_param_dict[
+                "stiffness_profile"
+            ] = stiffness_profile
+            config_param_dict[
+                "num_hinges"
+            ] = num_hinges
+            config_param_dict[
+                "spatial_kernel"
+            ] = spatial_kernel
+
+            for key, value in profile_config.get(
+                "extra_params",
+                {},
+            ).items():
+                config_param_dict[key] = value
+
+            results = run_pipeline_multiple_seeds(
+                param_dict=config_param_dict,
+                seeds=seeds,
+                kernel_type=kernel_type,
+                train_sample_fraction=(
+                    profile_train_fraction
+                ),
+                sampling=sampling,
+                make_individual_plots=False,
+                plot_average_rollout=False,
+                plot_average_error_curves=False,
+                plot_average_heatmap=False,
+                time_slices=time_slices,
+                save_average_plot=False,
+                q_growth_failure_threshold=(
+                    q_growth_failure_threshold
+                ),
+                edge=edge,
+            )
+
+            profile_model_results[label] = results
+
+            reference_output = results["all_outputs"][0]
+            simulator = reference_output["simulator"]
+            test_data = reference_output["test_data"]
+
+            z_current = np.asarray(
+                simulator.z,
+                dtype=float,
+            ).copy()
+
+            dz_current = float(simulator.dz)
+            dt_current = float(simulator.dt)
+
+            q_true_current = np.asarray(
+                test_data["q"],
+                dtype=float,
+            ).copy()
+
+            u_true_current = (
+                np.cumsum(
+                    q_true_current,
+                    axis=0,
+                )
+                * dz_current
+            )
+
+            if reference_z is None:
+                reference_z = z_current
+                reference_dz = dz_current
+                reference_dt = dt_current
+                reference_q_true = q_true_current
+                reference_u_true = u_true_current
+
+            else:
+                if not np.allclose(
+                    z_current,
+                    reference_z,
+                ):
+                    raise ValueError(
+                        "The spatial grids differ between model "
+                        f"configurations for '{stiffness_profile}'."
+                    )
+
+                if q_true_current.shape != (
+                    reference_q_true.shape
+                ):
+                    raise ValueError(
+                        "The ground-truth trajectory shapes differ "
+                        "between model configurations for "
+                        f"'{stiffness_profile}'."
+                    )
+
+                if not np.allclose(
+                    q_true_current,
+                    reference_q_true,
+                ):
+                    raise ValueError(
+                        "The ground-truth trajectories differ "
+                        "between model configurations for "
+                        f"'{stiffness_profile}'."
+                    )
+
+            q_gp_mean = np.asarray(
+                results["q_gp_mean"],
+                dtype=float,
+            ).copy()
+
+            if q_gp_mean.shape != reference_q_true.shape:
+                raise ValueError(
+                    f"Shape mismatch for {stiffness_profile}, "
+                    f"{label}: q_gp_mean has shape "
+                    f"{q_gp_mean.shape}, while q_true has shape "
+                    f"{reference_q_true.shape}."
+                )
+
+            u_gp_mean = (
+                np.cumsum(
+                    q_gp_mean,
+                    axis=0,
+                )
+                * reference_dz
+            )
+
+            profile_models_for_plot.append(
+                {
+                    "label": label,
+                    "kernel_type": kernel_type,
+                    "spatial_kernel": spatial_kernel,
+                    "q_gp_mean": q_gp_mean,
+                    "u_gp_mean": u_gp_mean,
+                }
+            )
+
+            metric_row = {
+                "stiffness_profile": stiffness_profile,
+                "row_label": row_label,
+                "train_sample_fraction": (
+                    profile_train_fraction
+                ),
+                "model": label,
+                "kernel_type": kernel_type,
+                "spatial_kernel": spatial_kernel,
+                **results["avg_metrics"],
+                "failure_rate": results[
+                    "failure_stats"
+                ]["failure_rate"],
+                "q_growth_ratio_mean": results[
+                    "failure_stats"
+                ]["q_growth_ratio_mean"],
+            }
+
+            metrics_rows.append(metric_row)
+
+        combined_results[stiffness_profile] = {
+            "train_sample_fraction": (
+                profile_train_fraction
+            ),
+            "matched_spatial_kernel": matched_kernel,
+            "model_results": profile_model_results,
+        }
+
+        profile_plot_data.append(
+            {
+                "stiffness_profile": stiffness_profile,
+                "row_label": row_label,
+                "num_hinges": num_hinges,
+                "train_sample_fraction": (
+                    profile_train_fraction
+                ),
+                "matched_spatial_kernel": matched_kernel,
+                "z": reference_z,
+                "dz": reference_dz,
+                "dt": reference_dt,
+                "q_true": reference_q_true,
+                "u_true": reference_u_true,
+                "models": profile_models_for_plot,
+            }
+        )
+
+        # Save after every completed profile so that lengthy
+        # computations are preserved incrementally.
+        _save_pickle_atomic(
+            plot_artifact,
+            save_plot_data_path,
+        )
+
+        print(
+            "[SAVED] Rollout plotting data updated at "
+            f"'{save_plot_data_path}'."
+        )
+
+    print(
+        "\n[SUCCESS] All rollout computations completed. "
+        f"Plotting data saved to '{save_plot_data_path}'."
+    )
+
+    return (
+        combined_results,
+        plot_artifact,
+        metrics_rows,
+    )
+
+
+def plot_stiffness(stiffness_param_arr):
+    import matplotlib.pyplot as plt
+
+    fig, axs = plt.subplots(len(stiffness_param_arr), 1, figsize=(8, 10), sharex=False)
+    for i, (stiffness, num_hinges) in enumerate(stiffness_param_arr):
+        sim = SoftRodSimulator(L=10.0, N=500, T=5.5, dt=0.05, num_hinges=num_hinges,
+                               stiffness_profile=stiffness)
+        z = sim.z
+        k = sim.stiffness
+
+        axs[i].plot(z, k)
+        axs[i].set_ylabel("Stiffness k(z)")
+
+    axs[-1].set_xlabel("z")
+    for ax in axs:
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    fig.savefig(
+        "./plots/stiffness_profile.pdf",
+        dpi=300,
+        bbox_inches="tight",
+    )
+
 
 
 def run_diagnostic(param_dict, kernel_type="baseline"):
@@ -750,13 +1229,6 @@ def run_diagnostic(param_dict, kernel_type="baseline"):
 
 
 if __name__ == '__main__':
-    # ("periodic", 4, "SD", "rbf"), ("periodic", 4, "SD", "periodic"),
-    # ("periodic", 4, "SD", "warped"), ("periodic", 4, "warped", "rbf")
-    # ("C2", 8, "baseline", "rbf"), ("C2", 8, "SD", "rbf"), ("C2", 8, "SD", "matern")
-    # ("piecewise", 2, "baseline", "rbf"), ("piecewise", 2, "SD", "rbf"),
-    # ("piecewise", 2, "SD", "matern"), ("piecewise", 2, "SD", "changepoint")
-    test_config = [("piecewise", 2, "baseline", "rbf"), ("piecewise", 2, "SD", "rbf"),
-                   ("piecewise", 2, "SD", "matern"), ("piecewise", 2, "SD", "changepoint")]
     param_dict = {
         "stiffness_profile": "piecewise",
         "num_hinges": 2,
@@ -767,8 +1239,88 @@ if __name__ == '__main__':
         "changepoint_width": 0.15,
         "n_freqs": 10
     }
-    run_model_configurations_with_overlay(param_dict, test_config, seeds=(6, 42, 79, 123, 456),
-                                          sampling="stratified", train_sample_fraction=0.04)
+
+    profile_configs = [
+        {
+            "stiffness_profile": "periodic",
+            "row_label": "Periodic",
+            "num_hinges": 4,
+            "matched_spatial_kernel": "periodic",
+            "train_sample_fraction": 0.06,
+        },
+        {
+            "stiffness_profile": "C2",
+            "row_label": r"$C^2$ bumps",
+            "num_hinges": 8,
+            "matched_spatial_kernel": "matern",
+            "train_sample_fraction": 0.06,
+            "extra_params": {
+                "matern_nu": 2.5,
+            },
+        },
+        {
+            "stiffness_profile": "piecewise",
+            "row_label": "Semi-piecewise",
+            "num_hinges": 2,
+            "matched_spatial_kernel": "changepoint",
+            "train_sample_fraction": 0.04,
+            "extra_params": {
+                "changepoint_location": 5.0,
+                "changepoint_width": 0.15
+            },
+        },
+    ]
+
+    stiffness_param_arr = [("periodic", 4), ("C2", 8), ("piecewise", 2)]
+
+    plot_stiffness(stiffness_param_arr)
+
+    # combined_results, plot_artifact, metrics_rows = (
+    #     run_all_profiles_with_rollout_grid(
+    #         param_dict=param_dict,
+    #         profile_configs=profile_configs,
+    #         seeds=(6, 42, 79, 123, 456),
+    #         sampling="stratified",
+    #         time_slices=(0, 50, 100),
+    #         q_growth_failure_threshold=3.0,
+    #         edge=5,
+    #         save_plot_data_path=(
+    #             "./data/all_profiles_rollout_data.pkl"
+    #         ),
+    #     )
+    # )
+
+    plot_info = load_rollout_plot_data(
+        "./data/all_profiles_rollout_data.pkl"
+    )
+
+    plot_multi_profile_rollout_grid(
+        profile_results=plot_info["profiles"],
+        time_slices=(0, 50, 100),
+        save_path=(
+            "./plots/all_profiles_rollout_grid.pdf"
+        ),
+        figsize=(12.0, 8.0),
+    )
+    # ("periodic", 4, "baseline", "rbf"), ("periodic", 4, "SD", "rbf"), ("periodic", 4, "SD", "periodic"),
+    # ("periodic", 4, "SD", "warped"), ("periodic", 4, "warped", "rbf")
+    # ("C2", 8, "baseline", "rbf"), ("C2", 8, "SD", "rbf"), ("C2", 8, "SD", "matern")
+    # ("piecewise", 2, "baseline", "rbf"), ("piecewise", 2, "SD", "rbf"),
+    # ("piecewise", 2, "SD", "matern"), ("piecewise", 2, "SD", "changepoint")
+    # test_config = [("piecewise", 2, "baseline", "rbf"), ("piecewise", 2, "SD", "rbf"),
+    #                ("piecewise", 2, "SD", "matern"), ("piecewise", 2, "SD", "changepoint")]
+    # param_dict = {
+    #     "stiffness_profile": "piecewise",
+    #     "num_hinges": 2,
+    #     "strain_kernel": "rbf",
+    #     "spatial_kernel": "changepoint",
+    #     "matern_nu": 2.5,
+    #     "changepoint_location": 5.0,
+    #     "changepoint_width": 0.15,
+    #     "n_freqs": 10
+    # }
+    # run_model_configurations_with_overlay(param_dict, test_config, seeds=(6, 42, 79, 123, 456),
+    #                                       sampling="stratified", train_sample_fraction=0.04, add_plt_title=False)
     # metrics_table = []
     # for stif_profile, num_hinges, kernel, spatial_kernel in test_config:
     #     print(f"CONFIG: {stif_profile} stiffness profile, {num_hinges} bumps/hinges, {kernel} kernel, {spatial_kernel} spatial kernel")

@@ -3,6 +3,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 import torch
 import gpytorch
+from pathlib import Path
 
 
 def stratified_z_indices(
@@ -366,7 +367,8 @@ def plot_effort_force_rmse_and_qmax_curves(
 
     axs[0].plot(t, curves["dHdq_rmse_t"])
     axs[0].set_ylabel(r"RMSE of $\partial_q H$")
-    axs[0].set_title(title)
+    if title is not None:
+        axs[0].set_title(title)
     axs[0].grid(True, alpha=0.3)
 
     axs[1].plot(t, curves["force_rmse_t"])
@@ -462,7 +464,8 @@ def plot_force_field_error_heatmap(
     plt.colorbar(im, label=cbar_label)
     plt.xlabel("t")
     plt.ylabel("z")
-    plt.title(title)
+    if title is not None:
+        plt.title(title)
     plt.tight_layout()
 
     if save_path is not None:
@@ -597,14 +600,15 @@ def plot_overlaid_average_rollout_time_slices(
     fig, axs = plt.subplots(
         1,
         len(time_slices),
-        figsize=(6 * len(time_slices), 4.8),
+        figsize=(5 * len(time_slices), 4.8),
         sharey=True,
     )
 
     if len(time_slices) == 1:
         axs = [axs]
 
-    fig.suptitle(title, fontsize=15, fontweight="bold")
+    if title is not None:
+        fig.suptitle(title, fontsize=15, fontweight="bold")
 
     handles = []
     labels = []
@@ -667,8 +671,7 @@ def plot_overlaid_average_rollout_time_slices(
         ncol=legend_ncol,
         frameon=True,
         fontsize=9,
-        bbox_to_anchor=(0.5, -0.02),
-    )
+    ) # bbox_to_anchor=(0.5, -0.02)
 
     plt.tight_layout(rect=(0, 0.08, 1, 0.93))
 
@@ -676,6 +679,197 @@ def plot_overlaid_average_rollout_time_slices(
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.close()
         print(f"[SUCCESS] Overlaid rollout plot saved as '{save_path}'")
+    else:
+        plt.show()
+
+
+def plot_multi_profile_rollout_grid(
+    profile_results,
+    time_slices=(0, 50, 100),
+    save_path=None,
+    figsize=(12.0, 8.0),
+):
+    """
+    Plot the saved rollout trajectories in a profile-by-time grid.
+
+    Parameters
+    ----------
+    profile_results:
+        The value of plot_artifact["profiles"].
+
+    time_slices:
+        Time-step indices shown as columns.
+
+    save_path:
+        Figure output path. PDF is recommended for papers.
+
+    figsize:
+        Matplotlib figure dimensions.
+    """
+    n_rows = len(profile_results)
+    n_cols = len(time_slices)
+
+    if n_rows == 0:
+        raise ValueError(
+            "profile_results cannot be empty."
+        )
+
+    fig, axs = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=figsize,
+        sharex=True,
+        sharey="row",
+        squeeze=False,
+    )
+
+    line_styles = {
+        "Baseline": "--",
+        "SD-RBF": "--",
+        "SD-matched": "--",
+    }
+
+    legend_handles = None
+    legend_labels = None
+
+    for row_idx, profile in enumerate(
+        profile_results
+    ):
+        z = np.asarray(profile["z"])
+        u_true = np.asarray(profile["u_true"])
+        dt = float(profile["dt"])
+        row_label = profile["row_label"]
+        model_summaries = profile["models"]
+
+        for col_idx, step in enumerate(
+            time_slices
+        ):
+            time_val = step * dt
+            if not 0 <= step < u_true.shape[1]:
+                raise IndexError(
+                    f"Step {step} is outside the valid range "
+                    f"for profile '{row_label}'."
+                )
+
+            ax = axs[row_idx, col_idx]
+
+            true_line, = ax.plot(
+                z,
+                u_true[:, step],
+                linestyle="-",
+                linewidth=1.8,
+                label="Ground truth",
+            )
+
+            model_lines = []
+
+            for model in model_summaries:
+                label = model["label"]
+                u_gp_mean = np.asarray(
+                    model["u_gp_mean"]
+                )
+
+                line, = ax.plot(
+                    z,
+                    u_gp_mean[:, step],
+                    linestyle=line_styles.get(
+                        label,
+                        "--",
+                    ),
+                    linewidth=1.5,
+                    label=label,
+                )
+
+                model_lines.append(line)
+
+            if row_idx == 0:
+                ax.set_title(
+                    f"Step {step} (t={time_val})",
+                    fontsize=11,
+                    fontweight="normal",
+                )
+
+            if row_idx == n_rows - 1:
+                ax.set_xlabel(r"$z$")
+            else:
+                ax.tick_params(
+                    axis="x",
+                    which="both",
+                    labelbottom=False,
+                )
+
+            if col_idx == 0:
+                ax.set_ylabel(r"$u(z,t)$")
+
+                ax.annotate(
+                    row_label,
+                    xy=(-0.20, 0.5),
+                    xycoords="axes fraction",
+                    rotation=90,
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    fontweight="bold",
+                )
+
+            ax.grid(
+                True,
+                linestyle=":",
+                alpha=0.45,
+            )
+
+            if row_idx == 0 and col_idx == 0:
+                legend_handles = [
+                    true_line,
+                    *model_lines,
+                ]
+
+                legend_labels = [
+                    "Ground truth",
+                    *[
+                        model["label"]
+                        for model in model_summaries
+                    ],
+                ]
+
+    fig.legend(
+        legend_handles,
+        legend_labels,
+        loc="lower center",
+        ncol=len(legend_labels),
+        frameon=True,
+        fontsize=9,
+        bbox_to_anchor=(0.5, 0.01),
+    )
+
+    fig.subplots_adjust(
+        left=0.12,
+        right=0.985,
+        top=0.93,
+        bottom=0.13,
+        wspace=0.10,
+        hspace=0.16,
+    )
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        fig.savefig(
+            save_path,
+            dpi=300,
+            bbox_inches="tight",
+        )
+
+        plt.close(fig)
+
+        print(
+            "[SUCCESS] Rollout grid saved as "
+            f"'{save_path}'."
+        )
     else:
         plt.show()
 
