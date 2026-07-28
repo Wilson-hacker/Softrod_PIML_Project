@@ -758,7 +758,7 @@ def plot_multi_profile_rollout_grid(
                 u_true[:, step],
                 linestyle="-",
                 linewidth=1.8,
-                label="Ground truth",
+                label="Numerical solution",
             )
 
             model_lines = []
@@ -825,7 +825,7 @@ def plot_multi_profile_rollout_grid(
                 ]
 
                 legend_labels = [
-                    "Ground truth",
+                    "Numerical solution",
                     *[
                         model["label"]
                         for model in model_summaries

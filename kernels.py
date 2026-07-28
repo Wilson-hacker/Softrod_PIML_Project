@@ -55,6 +55,8 @@ class StructuralDecoupledKernel(gpytorch.kernels.Kernel):
                 init_width=changepoint_width,
                 left_kernel=gpytorch.kernels.RBFKernel(ard_num_dims=1),
                 right_kernel=gpytorch.kernels.RBFKernel(ard_num_dims=1),
+                learn_location=True,
+                learn_width=True,
             )
         elif spatial_kernel_type == "warped":
             n_freqs = param_dict["n_freqs"]

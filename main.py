@@ -1,1343 +1,817 @@
+from __future__ import annotations
+
+import multiprocessing as mp
 import os
-import copy
-import sys
-import numpy as np
+from concurrent.futures import (
+    Future,
+    ProcessPoolExecutor,
+    as_completed,
+)
+from tqdm.auto import tqdm
 import torch
 import pickle
+import sys
 from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+import numpy as np
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from simulator import SoftRodSimulator
-from model import train_gp_model
-from utils import (
-    stratified_z_indices,
-    random_z_indices,
-    normalize_changepoint_params,
-    simulate_gp_phs,
-    compute_effort_force_error_curves,
-    compute_rollout_failure_stats,
-    plot_comparison,
-    plot_rollout_time_slices,
-    evaluate_gp_phs_model,
-    print_metrics_report,
-    plot_effort_force_rmse_and_qmax_curves,
-    plot_force_field_error_heatmap,
-    plot_overlaid_average_rollout_time_slices,
-    plot_multi_profile_rollout_grid
+from config import (
+    ARTIFACT_SCHEMA_VERSION,
+    AggregateResult,
+    DatasetBundle,
+    EvaluationConfig,
+    ExperimentSpec,
+    InitialCondition,
+    ModelConfig,
+    PipelineConfig,
+    RunResult,
+    SamplingConfig,
+    SimulationBundle,
+    SimulatorConfig,
+    TrainedModels,
+    TrainingConfig,
+    ParallelConfig,
+    SeedJob,
 )
-from diagnostic import (stiffness_activity_diagnostic,
-                        plot_q_dHdq_force_diagnostic,
-                        plot_boundary_vs_interior_q,
-                        scan_rollout_rhs_error,
-                        inspect_rhs_at_step)
+from metrics import (
+    aggregate_run_results,
+    evaluate_gp_phs_model,
+    extract_selected_metrics,
+    print_metrics_report,
+)
+from model import train_gp_model
+from rollout import (
+    attach_normalization_stats,
+    reconstruct_displacement_from_strain,
+    simulate_gp_phs,
+)
+from sampling import (
+    normalize_changepoint_params,
+    prepare_training_dataset,
+    seed_everything,
+)
+from simulator import SoftRodSimulator
 
 
-def get_train_q_config(z_arr, length):
-    return -4.0 * (z_arr - length / 2) * np.exp(-(z_arr - length / 2) ** 2)
+def default_initial_q(z: np.ndarray, length: float) -> np.ndarray:
+    """Initial strain profile used in the paper experiments."""
+    center = length / 2.0
+    return -4.0 * (z - center) * np.exp(-(z - center) ** 2)
 
-def get_test_q_config(z_arr, length):
-    return get_train_q_config(z_arr, length)
-    # return -3.0 * (z_arr - length * 0.4) * np.exp(-0.8 * (z_arr - length * 0.4) ** 2)
 
-def get_file_tag(kernel_type, param_dict):
-    if kernel_type == "SD":
-        return f"{param_dict["stiffness_profile"]}_stiff_{param_dict["strain_kernel"]}_{param_dict["spatial_kernel"]}"
-    elif kernel_type == "baseline" or kernel_type == "warped":
-        return f"{param_dict["stiffness_profile"]}_stiff_{kernel_type}"
+def initialize_seed_worker(
+        torch_threads: int,
+) -> None:
+    """
+    Configure CPU threading inside one worker process.
+
+    Each process trains an independent model, so unrestricted Torch
+    threading can otherwise oversubscribe the available CPU cores.
+    """
+    torch.set_num_threads(torch_threads)
+
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        # PyTorch permits setting this only before inter-op work starts.
+        pass
+
+
+def resolve_parallel_resources(
+        parallel_config: ParallelConfig,
+        number_of_jobs: int,
+) -> tuple[int, int]:
+    """
+    Determine the number of processes and Torch threads per process.
+    """
+    available_cpus = os.cpu_count() or 1
+
+    if parallel_config.max_workers is None:
+        max_workers = min(
+            number_of_jobs,
+            available_cpus,
+        )
     else:
-        raise ValueError(f"Unknown kernel type: {kernel_type}")
+        max_workers = min(
+            number_of_jobs,
+            parallel_config.max_workers,
+            available_cpus,
+        )
 
-def get_caption_tag(kernel_type, param_dict):
-    if kernel_type == "SD":
-        spatial_kernel_str = fr"{param_dict["spatial_kernel"]} $\nu={param_dict["matern_nu"]:.1f}$" \
-            if param_dict["spatial_kernel"] == "matern" else param_dict["spatial_kernel"]
-        return f"SD-{spatial_kernel_str}"
-    elif kernel_type == "baseline" or kernel_type == "warped":
-        return kernel_type
+    max_workers = max(1, max_workers)
+
+    if parallel_config.torch_threads_per_worker is None:
+        torch_threads = max(
+            1,
+            available_cpus // max_workers,
+        )
     else:
-        raise ValueError(f"Unknown kernel type: {kernel_type}")
+        torch_threads = (
+            parallel_config.torch_threads_per_worker
+        )
+
+    return max_workers, torch_threads
 
 
-def extract_selected_metrics(metrics):
-    """
-    Extract only the metrics requested for multi-seed averaging.
-    """
-    return {
-        "q_rel_l2": metrics["rollout"]["q_rel_l2"],
-        "u_rel_l2": metrics["rollout"]["u_rel_l2"],
-        "energy_rel_l2": metrics["energy"]["energy_rel_l2"],
-        "curl_rms": metrics["integrability"]["curl_rms"],
-        "dHdq_rmse": metrics["calibration"]["dHdq"]["rmse"],
-        "dHdq_force_rmse": metrics["calibration"]["dHdq_force"]["dHdq_force_rmse"],
-    }
-
-
-def _save_pickle_atomic(data, save_path):
-    """
-    Save a Python object atomically.
-
-    The temporary file is replaced only after serialization succeeds,
-    reducing the risk of leaving a corrupted result file.
-    """
-    save_path = Path(save_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-
-    temporary_path = save_path.with_suffix(
-        save_path.suffix + ".tmp"
+def create_simulation_bundle(
+        config: SimulatorConfig,
+        training_initial_condition: InitialCondition = default_initial_q,
+        evaluation_initial_condition: InitialCondition | None = None,
+) -> SimulationBundle:
+    """Generate deterministic reference trajectories once per simulator setup."""
+    simulator = SoftRodSimulator(**config.simulator_kwargs())
+    training_data = simulator.generate_dataset(training_initial_condition)
+    evaluation_data = (
+        training_data
+        if evaluation_initial_condition is None
+        else simulator.generate_dataset(evaluation_initial_condition)
+    )
+    return SimulationBundle(
+        simulator=simulator,
+        training_data=training_data,
+        evaluation_data=evaluation_data,
     )
 
-    with temporary_path.open("wb") as file:
-        pickle.dump(
-            data,
-            file,
-            protocol=pickle.HIGHEST_PROTOCOL,
+
+def get_training_dataset(
+        simulation: SimulationBundle,
+        sampling_config: SamplingConfig,
+        training_config: TrainingConfig,
+        seed: int,
+) -> DatasetBundle:
+    """Prepare one seed's exact training set, held-out set, and targets."""
+    return prepare_training_dataset(
+        reference_data=simulation.training_data,
+        sampling_config=sampling_config,
+        seed=seed,
+        normalization_eps=training_config.normalization_eps,
+    )
+
+
+def normalized_model_parameters(
+        pipeline_config: PipelineConfig,
+        dataset: DatasetBundle,
+) -> dict[str, object]:
+    params = pipeline_config.model.training_params(pipeline_config.simulator)
+    if (
+            pipeline_config.model.kernel_type == "SD"
+            and pipeline_config.model.spatial_kernel == "changepoint"
+    ):
+        location, width = normalize_changepoint_params(
+            location_physical=pipeline_config.model.changepoint_location,
+            width_physical=pipeline_config.model.changepoint_width,
+            normalization=dataset.normalization,
         )
-
-    temporary_path.replace(save_path)
-
-
-def load_rollout_plot_data(save_path):
-    """
-    Load a rollout plotting artifact created by
-    run_all_profiles_with_rollout_grid().
-
-    Only load pickle files that you created or trust.
-    """
-    save_path = Path(save_path)
-
-    with save_path.open("rb") as file:
-        plot_artifact = pickle.load(file)
-
-    expected_version = 1
-
-    if plot_artifact.get("schema_version") != expected_version:
-        raise ValueError(
-            "Unsupported rollout artifact version: "
-            f"{plot_artifact.get('schema_version')}."
-        )
-
-    return plot_artifact
+        params["changepoint_location"] = location
+        params["changepoint_width"] = width
+    return params
 
 
-def print_metrics_table(metrics_table):
-    print(f"{'Trial num.':>10} | {'q_rel_l2':>8} | {'u_rel_l2':>8} | {'E_rel_l2':>8} | {'curl_rms':>8} | {'dHdq_rmse':>9} | {'force_rmse':>10} | {'%fail.':>8} | {'max_q_ratio':>11}")
-    print("-" * 110)
-    for i, metric in enumerate(metrics_table):
-        print(f"{i:>10d} | "
-              f"{metric[0]:>8.2e} | "
-              f"{metric[1]:>8.2e} | "
-              f"{metric[2]:>8.2e} | "
-              f"{metric[3]:>8.2e} | "
-              f"{metric[4]:>9.2e} | "
-              f"{metric[5]:>10.2e} | "
-              f"{metric[6]:>8.2e} | "
-              f"{metric[7]:>11.2e}")
+def train_effort_models(
+        pipeline_config: PipelineConfig,
+        dataset: DatasetBundle,
+) -> TrainedModels:
+    """Train the momentum- and constitutive-effort GP models."""
+    model_params = normalized_model_parameters(pipeline_config, dataset)
+    training = pipeline_config.training
+
+    dEdp_model, dEdp_likelihood = train_gp_model(
+        dataset.X_train_norm,
+        dataset.y_p_train_norm,
+        model_params,
+        kernel_type="baseline",
+        training_iter=training.training_iter,
+        patience=training.patience,
+        verbose=training.verbose,
+    )
+    dEdq_model, dEdq_likelihood = train_gp_model(
+        dataset.X_train_norm,
+        dataset.y_q_train_norm,
+        model_params,
+        kernel_type=pipeline_config.model.kernel_type,
+        training_iter=training.training_iter,
+        patience=training.patience,
+        verbose=training.verbose,
+    )
+
+    models = TrainedModels(
+        dEdp_model=dEdp_model,
+        dEdp_likelihood=dEdp_likelihood,
+        dEdq_model=dEdq_model,
+        dEdq_likelihood=dEdq_likelihood,
+    )
+    attach_normalization_stats(models, dataset.normalization)
+    return models
 
 
 def run_pipeline(
-    param_dict,
-    seed=42,
-    kernel_type="baseline",
-    sampling="random",
-    train_sample_fraction=0.06,
-    make_plots=True,
-    return_outputs=True,
-    verbose=False,
-):
-    print("\n--- Step 1: Solving Soft Robot PDE via Numerical Integrators ---")
-    sim = SoftRodSimulator(
-        L=10.0,
-        N=60,
-        T=5.5,
-        dt=0.05,
-        num_hinges=param_dict["num_hinges"],
-        stiffness_profile=param_dict["stiffness_profile"],
-    )
+        pipeline_config: PipelineConfig,
+        seed: int = 42,
+        simulation: SimulationBundle | None = None,
+        training_initial_condition: InitialCondition = default_initial_q,
+        evaluation_initial_condition: InitialCondition | None = None,
+) -> RunResult:
+    """Compute one model/seed result. This function never creates plots."""
+    seed_everything(seed)
 
-    data = sim.generate_dataset(get_train_q_config)
-
-    p_flat = data["p"].flatten()
-    q_flat = data["q"].flatten()
-    dH_dq_target = data["dH_dq"].flatten()
-    dH_dp_target = data["dH_dp"].flatten()
-
-    N_pts, T_steps = data["q"].shape
-    z_tiled = np.tile(data["z"].reshape(N_pts, 1), (1, T_steps))
-    z_flat = z_tiled.flatten()
-
-    X = np.stack([p_flat, q_flat, z_flat], axis=1)
-
-    if sampling == "random":
-        train_idx = random_z_indices(X, train_fraction=train_sample_fraction, seed=seed)
-    elif sampling == "stratified":
-        train_idx = stratified_z_indices(
-            X,
-            train_fraction=train_sample_fraction,
-            seed=seed,
-            left_region=(0.0, 2.0),
-            middle_region=(2.0, 8.0),
-            right_region=(8.0, 10.0),
-            weights=(0.30, 0.40, 0.30),
-            include_domain_boundaries=True,
+    if simulation is None:
+        simulation = create_simulation_bundle(
+            config=pipeline_config.simulator,
+            training_initial_condition=training_initial_condition,
+            evaluation_initial_condition=evaluation_initial_condition,
         )
-    else:
-        raise ValueError(f"sampling {sampling} is not supported")
+    verbose = pipeline_config.training.verbose
 
-    X_train = torch.tensor(X[train_idx], dtype=torch.float64)
-    y_dEdp_train = torch.tensor(dH_dp_target[train_idx], dtype=torch.float64)
-    y_dEdq_train = torch.tensor(dH_dq_target[train_idx], dtype=torch.float64)
-
-    print(f"Data Generation Complete. GP Input Shape: {X_train.shape}")
-
-    # Z-score normalization
-    X_mean, X_std = X_train.mean(dim=0), X_train.std(dim=0)
-    X_train_norm = (X_train - X_mean) / (X_std + 1e-6)
-
-    y_p_mean, y_p_std = y_dEdp_train.mean(), y_dEdp_train.std()
-    y_p_train_norm = (y_dEdp_train - y_p_mean) / (y_p_std + 1e-6)
-
-    y_q_mean, y_q_std = y_dEdq_train.mean(), y_dEdq_train.std()
-    y_q_train_norm = (y_dEdq_train - y_q_mean) / (y_q_std + 1e-6)
-
-    param_dict_copy = copy.deepcopy(param_dict)
-    if kernel_type == "SD" and param_dict["spatial_kernel"] == "changepoint":
-        init_location_norm, init_width_norm = normalize_changepoint_params(
-            param_dict["changepoint_location"], param_dict["changepoint_width"], X_mean, X_std)
-        param_dict_copy["changepoint_location"], param_dict_copy["changepoint_width"] = init_location_norm, init_width_norm
-
-    print("\n--- Step 2: Training GP-PHS Component Models ---")
-
-    dEdp_model, dEdp_lh = train_gp_model(
-        X_train_norm,
-        y_p_train_norm,
-        param_dict_copy,
-        kernel_type="baseline",
-        training_iter=1000,
-        patience=15,
-        verbose=verbose,
-    )
-
-    dEdq_model, dEdq_lh = train_gp_model(
-        X_train_norm,
-        y_q_train_norm,
-        param_dict_copy,
-        kernel_type=kernel_type,
-        training_iter=1000,
-        patience=15,
-        verbose=verbose,
-    )
-
-    # Store normalization stats
-    dEdp_model.X_mean, dEdp_model.X_std = X_mean, X_std
-    dEdp_model.y_mean, dEdp_model.y_std = y_p_mean, y_p_std
-
-    dEdq_model.X_mean, dEdq_model.X_std = X_mean, X_std
-    dEdq_model.y_mean, dEdq_model.y_std = y_q_mean, y_q_std
-
-    print("\n--- Step 3: Running Dynamic Rollout and Time-Slice Comparisons ---")
-
-    file_tag = get_file_tag(kernel_type, param_dict)
-    title_tag = get_caption_tag(kernel_type, param_dict)
-
-    p_gp, q_gp = simulate_gp_phs(
-        sim,
-        dEdp_model,
-        dEdq_model,
-        get_test_q_config,
-    )
-
-    test_data = sim.generate_dataset(get_test_q_config)
-
-    if make_plots:
-        plot_rollout_time_slices(
-            data=test_data,
-            q_pred=q_gp,
-            simulator=sim,
-            time_slices=[0, 50, 100],
-            save_path=f"./plots/string_slices_{file_tag}_seed{seed}.png",
-            legend_tag=f"{title_tag}, seed={seed}",
-            title=f"1D String Configuration ({param_dict["stiffness_profile"]} stiffness)",
-            pred_label_prefix="GP-PHS Prediction",
+    if verbose:
+        print("\n" + "=" * 80)
+        print(
+            f"Profile={pipeline_config.simulator.stiffness_profile} | "
+            f"Model={pipeline_config.model.label} | Seed={seed}"
         )
+        print("=" * 80)
 
-    print("\n--- Step 4: Computing Paper-Ready Evaluation Metrics ---")
-
-    metrics, dHdq_summary, H_true, H_gp = evaluate_gp_phs_model(
-        data=test_data,
-        simulator=sim,
-        p_gp=p_gp,
-        q_gp=q_gp,
-        dEdp_model=dEdp_model,
-        dEdq_model=dEdq_model,
-        dEdp_likelihood=dEdp_lh,
-        dEdq_likelihood=dEdq_lh,
-        downscale_factor=train_sample_fraction,
-        grid_shape=(N_pts, T_steps),
-        seed=seed,
-        sampling=sampling
+        print("[1/4] Preparing the training dataset")
+    dataset = get_training_dataset(
+        simulation,
+        pipeline_config.sampling,
+        pipeline_config.training,
+        seed,
     )
 
     if verbose:
+        print("[2/4] Training the effort models")
+    trained_models = train_effort_models(pipeline_config, dataset)
+
+    if verbose:
+        print("[3/4] Running the learned-model rollout")
+    rollout_initial_condition = (
+        training_initial_condition
+        if evaluation_initial_condition is None
+        else evaluation_initial_condition
+    )
+    p_gp, q_gp = simulate_gp_phs(
+        simulator=simulation.simulator,
+        models=trained_models,
+        initial_condition=rollout_initial_condition,
+        method=pipeline_config.evaluation.rollout_method,
+    )
+
+    if verbose:
+        print("[4/4] Evaluating the model")
+    metrics, dHdq_summary, H_reference, H_gp = evaluate_gp_phs_model(
+        evaluation_data=simulation.evaluation_data,
+        simulator=simulation.simulator,
+        p_gp=p_gp,
+        q_gp=q_gp,
+        models=trained_models,
+        dataset=dataset,
+        evaluation_config=pipeline_config.evaluation,
+        seed=seed,
+    )
+
+    if pipeline_config.training.verbose:
         print_metrics_report(metrics)
 
-    if make_plots:
-        print("\n--- Step 5: Doing Error Analysis on Effort, Force and Strain ---")
-
-        curves = compute_effort_force_error_curves(
-            dHdq_summary=dHdq_summary,
-            q_gp=q_gp,
-            simulator=sim,
-            data=test_data,
-            edge=5,
-        )
-
-        plot_effort_force_rmse_and_qmax_curves(
-            curves=curves,
-            title=f"Effort / Force Error and Strain Growth ({param_dict["stiffness_profile"]} stiffness, {title_tag}, seed={seed}))",
-            save_path=f"./plots/force_err(t)_{file_tag}_seed{seed}.png",
-        )
-
-        plot_force_field_error_heatmap(
-            simulator=sim,
-            data=test_data,
-            dHdq_summary=dHdq_summary,
-            grid_shape=(N_pts, T_steps),
-            edge=5,
-            log_scale=False,
-            title=fr"Force-Field Error: $|\Delta \partial_z(\partial_q H)|$ ({param_dict["stiffness_profile"]} stiffness, {title_tag}, seed={seed})",
-            save_path=f"./plots/force_field_err_{file_tag}_seed{seed}.png",
-        )
-
-    print("Pipeline execution completed successfully.\n")
-
-    if return_outputs:
-        return {
-            "seed": seed,
-            "metrics": metrics,
-            "dHdq_summary": dHdq_summary,
-            "H_true": H_true,
-            "H_gp": H_gp,
-            "p_gp": p_gp,
-            "q_gp": q_gp,
-            "test_data": test_data,
-            "simulator": sim,
-            "file_tag": file_tag,
-            "title_tag": title_tag,
-        }
-    else:
-        return None
-
-
-def run_pipeline_multiple_seeds(
-    param_dict,
-    seeds=(0, 1, 2, 3, 4),
-    kernel_type="baseline",
-    train_sample_fraction=0.06,
-    sampling="random",
-    make_individual_plots=False,
-    plot_average_rollout=True,
-    plot_average_error_curves=True,
-    plot_average_heatmap=True,
-    time_slices=(0, 50, 100),
-    save_average_plot=True,
-    q_growth_failure_threshold=3.0,
-    edge=5,
-    add_plt_title=True,
-):
-    """
-    Runs run_pipeline() for multiple random seeds, averages selected metrics,
-    plots average rollout/error diagnostics, and reports failure rate.
-
-    Failure definition:
-        A seed fails if
-
-            max |q_GP| / max |q_true| > q_growth_failure_threshold
-
-        using only the interior region.
-    """
-
-    all_outputs = []
-    per_seed_metrics = []
-    per_seed_curves = []
-    force_error_abs_list = []
-
-    for seed in seeds:
-        print("\n" + "=" * 80)
-        print(f"Running seed {seed}")
-        print("=" * 80)
-
-        out = run_pipeline(
-            param_dict=param_dict,
-            train_sample_fraction=train_sample_fraction,
-            seed=seed,
-            kernel_type=kernel_type,
-            make_plots=make_individual_plots,
-            return_outputs=True,
-            sampling=sampling,
-        )
-
-        all_outputs.append(out)
-
-        selected = extract_selected_metrics(out["metrics"])
-        selected["seed"] = seed
-        per_seed_metrics.append(selected)
-
-        curves = compute_effort_force_error_curves(
-            dHdq_summary=out["dHdq_summary"],
-            q_gp=out["q_gp"],
-            simulator=out["simulator"],
-            data=out["test_data"],
-            edge=edge,
-        )
-
-        per_seed_curves.append(curves)
-        force_error_abs_list.append(curves["force_error_abs"])
-
-    # ------------------------------------------------------------
-    # Average selected scalar metrics
-    # ------------------------------------------------------------
-    metric_keys = [
-        "q_rel_l2",
-        "u_rel_l2",
-        "energy_rel_l2",
-        "curl_rms",
-        "dHdq_rmse",
-        "dHdq_force_rmse",
-    ]
-
-    avg_metrics = {}
-    std_metrics = {}
-
-    for key in metric_keys:
-        values = np.array([m[key] for m in per_seed_metrics], dtype=float)
-        avg_metrics[key] = float(np.mean(values))
-        std_metrics[key] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
-
-    # ------------------------------------------------------------
-    # Average predicted rollout q and p over seeds
-    # ------------------------------------------------------------
-    q_stack = np.stack([out["q_gp"] for out in all_outputs], axis=0)
-    p_stack = np.stack([out["p_gp"] for out in all_outputs], axis=0)
-
-    q_gp_mean = np.mean(q_stack, axis=0)
-    p_gp_mean = np.mean(p_stack, axis=0)
-
-    # Kept only for possible diagnostics; not plotted as a band.
-    q_gp_std = np.std(q_stack, axis=0, ddof=1) if len(seeds) > 1 else np.zeros_like(q_gp_mean)
-    p_gp_std = np.std(p_stack, axis=0, ddof=1) if len(seeds) > 1 else np.zeros_like(p_gp_mean)
-
-    # Reference deterministic objects
-    ref_output = all_outputs[0]
-    sim = ref_output["simulator"]
-    test_data = ref_output["test_data"]
-    title_tag = ref_output["title_tag"]
-    file_tag = ref_output["file_tag"]
-
-    # ------------------------------------------------------------
-    # Average effort/force curves
-    # ------------------------------------------------------------
-    t_arr = per_seed_curves[0]["t"]
-
-    dHdq_rmse_stack = np.stack([c["dHdq_rmse_t"] for c in per_seed_curves], axis=0)
-    force_rmse_stack = np.stack([c["force_rmse_t"] for c in per_seed_curves], axis=0)
-    qmax_gp_stack = np.stack([c["qmax_gp_t"] for c in per_seed_curves], axis=0)
-
-    avg_curves = {
-        "t": t_arr,
-        "dHdq_rmse_t": np.mean(dHdq_rmse_stack, axis=0),
-        "force_rmse_t": np.mean(force_rmse_stack, axis=0),
-        "qmax_gp_t": np.mean(qmax_gp_stack, axis=0),
-        "qmax_true_t": per_seed_curves[0]["qmax_true_t"],
-    }
-
-    # ------------------------------------------------------------
-    # Average force-field error heatmap
-    # ------------------------------------------------------------
-    force_error_abs_stack = np.stack(force_error_abs_list, axis=0)
-    force_error_abs_mean = np.mean(force_error_abs_stack, axis=0)
-
-    # Optional but useful to keep
-    force_error_abs_max = np.max(force_error_abs_stack, axis=0)
-
-    # ------------------------------------------------------------
-    # Failure statistics
-    # ------------------------------------------------------------
-    failure_stats = compute_rollout_failure_stats(
-        all_outputs=all_outputs,
-        edge=edge,
-        q_growth_failure_threshold=q_growth_failure_threshold,
-    )
-
-    # ------------------------------------------------------------
-    # Plots
-    # ------------------------------------------------------------
-    if plot_average_rollout:
-        save_path = (
-            f"./plots/avg_string_slices_{file_tag}.png"
-            if save_average_plot
-            else None
-        )
-
-        plot_rollout_time_slices(
-            data=test_data,
-            q_pred=q_gp_mean,
-            simulator=sim,
-            time_slices=list(time_slices),
-            save_path=save_path,
-            legend_tag=f"{title_tag}, {len(seeds)} seeds",
-            title=f"Average 1D String Configuration Across Seeds ({param_dict["stiffness_profile"]} stiffness)",
-            pred_label_prefix="Mean GP-PHS Prediction",
-        )
-
-    if plot_average_error_curves:
-        save_path = (
-            f"./plots/avg_force_err(t)_{file_tag}.png"
-            if save_average_plot
-            else None
-        )
-
-        avg_err_plt_title = f"Average Effort / Force Error and Strain Growth ({param_dict["stiffness_profile"]} stiffness, {title_tag})" \
-            if add_plt_title else None
-        plot_effort_force_rmse_and_qmax_curves(
-            curves=avg_curves,
-            title=avg_err_plt_title,
-            save_path=save_path,
-        )
-
-    if plot_average_heatmap:
-        save_path = (
-            f"./plots/avg_force_field_err_{file_tag}.png"
-            if save_average_plot
-            else None
-        )
-
-        heatmap_title = fr"Mean Force-Field Error: $|\Delta \partial_z(\partial_q H)|$ ({param_dict["stiffness_profile"]} stiffness, {title_tag})" \
-            if add_plt_title else None
-        plot_force_field_error_heatmap(
-            simulator=sim,
-            data=test_data,
-            force_error_abs=force_error_abs_mean,
-            edge=edge,
-            log_scale=False,
-            title=heatmap_title,
-            save_path=save_path,
-        )
-
-    # ------------------------------------------------------------
-    # Print summary
-    # ------------------------------------------------------------
-    print("\n" + "=" * 80)
-    print("Multi-seed average metrics")
-    print("=" * 80)
-
-    for key in metric_keys:
-        print(f"{key:24s}: {avg_metrics[key]:.6e} ± {std_metrics[key]:.6e}")
-
-    print("\nRollout failure statistics")
-    print("-" * 80)
-    print(
-        "Failure definition: "
-        f"max|q_GP| / max|q_true| > {q_growth_failure_threshold:.2f}"
-    )
-    print(
-        f"Failures: {failure_stats['num_failures']} / {failure_stats['num_seeds']} "
-        f"= {100.0 * failure_stats['failure_rate']:.1f}%"
-    )
-    print(f"Failed seeds: {failure_stats['failed_seeds']}")
-    print(
-        "q-growth ratio: "
-        f"mean = {failure_stats['q_growth_ratio_mean']:.3f}, "
-        f"std = {failure_stats['q_growth_ratio_std']:.3f}, "
-        f"max = {failure_stats['q_growth_ratio_max']:.3f}"
-    )
-
-    print("=" * 80 + "\n")
-
-    summary = {
-        "avg_metrics": avg_metrics,
-        "std_metrics": std_metrics,
-        "per_seed_metrics": per_seed_metrics,
-
-        "failure_stats": failure_stats,
-
-        "q_gp_mean": q_gp_mean,
-        "q_gp_std": q_gp_std,
-        "p_gp_mean": p_gp_mean,
-        "p_gp_std": p_gp_std,
-
-        "avg_curves": avg_curves,
-        "per_seed_curves": per_seed_curves,
-
-        "force_error_abs_mean": force_error_abs_mean,
-        "force_error_abs_max": force_error_abs_max,
-
-        "all_outputs": all_outputs,
-    }
-
-    return summary
-
-
-def run_model_configurations_with_overlay(
-    param_dict,
-    test_config,
-    seeds=(6, 42, 79, 123, 456),
-    sampling="stratified",
-    train_sample_fraction=0.06,
-    time_slices=(0, 50, 100),
-    q_growth_failure_threshold=3.0,
-    edge=5,
-    save_overlay_path=None,
-    plot_overlay=True,
-    add_plt_title=True
-):
-    """
-    Runs run_pipeline_multiple_seeds() across several model configurations,
-    collects averaged metrics, and plots overlaid averaged rollout trajectories.
-
-    Args:
-        param_dict:
-            Base parameter dictionary. This function copies it for each config.
-        test_config:
-            Iterable of tuples:
-                (stif_profile, num_hinges, kernel, spatial_kernel)
-        seeds:
-            Random seeds for each model configuration.
-        sampling:
-            Sampling method passed to run_pipeline_multiple_seeds().
-        train_sample_fraction:
-            Training fraction passed to run_pipeline_multiple_seeds().
-        time_slices:
-            Time slices for the overlaid rollout plot.
-        q_growth_failure_threshold:
-            Failure threshold used in run_pipeline_multiple_seeds().
-        edge:
-            Interior exclusion region for diagnostics.
-        save_overlay_path:
-            Path for the overlaid rollout plot.
-        plot_overlay:
-            If True, creates the overlaid rollout plot.
-        print_table_fn:
-            Optional function, e.g. print_metrics_table.
-
-    Returns:
-        results_by_label:
-            Dictionary mapping short labels to multi-seed summaries.
-
-        metrics_table:
-            List of metric rows.
-
-        model_summaries:
-            List used for overlaid rollout plotting.
-    """
-
-    results_by_label = {}
-    metrics_table = []
-    model_summaries = []
-
-    metric_keys = [
-        "q_rel_l2",
-        "u_rel_l2",
-        "energy_rel_l2",
-        "curl_rms",
-        "dHdq_rmse",
-        "dHdq_force_rmse",
-    ]
-
-    ref_test_data = None
-    ref_simulator = None
-    stiffness_profile_for_title = None
-
-    for config in test_config:
-        stif_profile, num_hinges, kernel, spatial_kernel = config
-
-        # Avoid mutating the original param_dict across configurations.
-        config_param_dict = copy.deepcopy(param_dict)
-        config_param_dict["stiffness_profile"] = stif_profile
-        config_param_dict["num_hinges"] = num_hinges
-        config_param_dict["spatial_kernel"] = spatial_kernel
-
-        label = get_caption_tag(kernel, config_param_dict)
-
-        print("\n" + "#" * 90)
-        print(
-            f"CONFIG: {stif_profile} stiffness, "
-            f"num_hinges={num_hinges}, "
-            f"kernel={kernel}, "
-            f"spatial_kernel={spatial_kernel}, "
-            f"label={label}"
-        )
-        print("#" * 90)
-
-        results = run_pipeline_multiple_seeds(
-            param_dict=config_param_dict,
-            seeds=seeds,
-            kernel_type=kernel,
-            train_sample_fraction=train_sample_fraction,
-            sampling=sampling,
-            make_individual_plots=False,
-
-            # Disable per-config plots here.
-            # The wrapper will make one clean overlaid rollout plot.
-            plot_average_rollout=False,
-            plot_average_error_curves=True,
-            plot_average_heatmap=True,
-
-            time_slices=time_slices,
-            save_average_plot=True,
-            q_growth_failure_threshold=q_growth_failure_threshold,
-            edge=edge,
-            add_plt_title=add_plt_title,
-        )
-
-        results_by_label[label] = results
-
-        # --------------------------------------------------------
-        # Store metric row
-        # --------------------------------------------------------
-        metric_row = [results["avg_metrics"][key] for key in metric_keys]
-        metric_row.append(results["failure_stats"]["failure_rate"])
-        metric_row.append(results["failure_stats"]["q_growth_ratio_mean"])
-
-        metrics_table.append(metric_row)
-
-        # --------------------------------------------------------
-        # Store model summary for overlay plot
-        # --------------------------------------------------------
-        model_summaries.append(
-            {
-                "label": label,
-                "q_gp_mean": results["q_gp_mean"],
-                "avg_metrics": results["avg_metrics"],
-                "failure_stats": results["failure_stats"],
-            }
-        )
-
-        # Reference simulator/test data should be identical across configs
-        # for a fixed stiffness profile. Use first config as reference.
-        if ref_test_data is None:
-            ref_test_data = results["all_outputs"][0]["test_data"]
-            ref_simulator = results["all_outputs"][0]["simulator"]
-            stiffness_profile_for_title = stif_profile
-
-    print_metrics_table(metrics_table)
-
-    # ------------------------------------------------------------
-    # Overlaid rollout plot
-    # ------------------------------------------------------------
-    if plot_overlay:
-        if save_overlay_path is None:
-            save_overlay_path = (
-                f"./plots/overlay_rollout_{stiffness_profile_for_title}_"
-                f"nmodels{len(model_summaries)}_nseeds{len(seeds)}.png"
-            )
-
-        rollout_title = f"Average Rollout Comparison ({stiffness_profile_for_title} stiffness)" if add_plt_title else None
-        plot_overlaid_average_rollout_time_slices(
-            data=ref_test_data,
-            model_summaries=model_summaries,
-            simulator=ref_simulator,
-            time_slices=time_slices,
-            save_path=save_overlay_path,
-            title=rollout_title,
-            legend_ncol=max(4, len(model_summaries) + 1),
-        )
-
-    return results_by_label, metrics_table, model_summaries
-
-
-def run_all_profiles_with_rollout_grid(
-    param_dict,
-    profile_configs,
-    seeds=(6, 42, 79, 123, 456),
-    sampling="stratified",
-    time_slices=(0, 50, 100),
-    q_growth_failure_threshold=3.0,
-    edge=5,
-    save_plot_data_path="./plots/all_profiles_rollout_data.pkl",
-    baseline_kernel_type="baseline",
-    sd_kernel_type="SD",
-):
-    """
-    Compute multi-seed rollout results for all stiffness profiles and save
-    the information required for later plotting.
-
-    This function does not generate any figures.
-
-    Each profile configuration must contain:
-
-        {
-            "stiffness_profile": "periodic",
-            "row_label": "Periodic",
-            "num_hinges": 4,
-            "matched_spatial_kernel": "periodic",
-            "train_sample_fraction": 0.06,
-        }
-
-    Optional profile-specific model parameters can be supplied through:
-
-        "extra_params": {
-            ...
-        }
-
-    Parameters
-    ----------
-    param_dict:
-        Base simulation and model parameter dictionary.
-
-    profile_configs:
-        Ordered list of profile configuration dictionaries.
-
-    seeds:
-        Sampling seeds used for every model configuration.
-
-    sampling:
-        Sampling strategy passed to run_pipeline_multiple_seeds().
-
-    time_slices:
-        Default time steps to show when the saved artifact is plotted.
-
-    q_growth_failure_threshold:
-        Threshold used to classify rollout failures.
-
-    edge:
-        Boundary exclusion size used by diagnostic calculations.
-
-    save_plot_data_path:
-        Path of the serialized plotting artifact.
-
-    baseline_kernel_type:
-        Identifier used for the baseline model.
-
-    sd_kernel_type:
-        Identifier used for the structural-decoupling models.
-
-    Returns
-    -------
-    combined_results:
-        Full in-memory results returned by run_pipeline_multiple_seeds().
-        These results are not serialized because they may contain model
-        objects or other nonportable data.
-
-    plot_artifact:
-        Self-contained dictionary containing trajectories, metadata,
-        and metrics needed for plotting and result-table construction.
-
-    metrics_rows:
-        Flat list of metric dictionaries.
-    """
-    combined_results = {}
-    profile_plot_data = []
-    metrics_rows = []
-
-    plot_artifact = {
-        "schema_version": 1,
-        "metadata": {
-            "seeds": tuple(seeds),
-            "sampling": sampling,
-            "time_slices": tuple(time_slices),
-            "q_growth_failure_threshold": (
-                q_growth_failure_threshold
-            ),
-            "edge": edge,
+    return RunResult(
+        experiment_name=(
+            pipeline_config.simulator.stiffness_profile
+        ),
+        model_label=pipeline_config.model.label,
+        seed=seed,
+        pipeline_config=pipeline_config,
+        metrics=metrics,
+        p_gp=np.asarray(p_gp),
+        q_gp=np.asarray(q_gp),
+        H_reference=np.asarray(H_reference),
+        H_gp=np.asarray(H_gp),
+        dHdq_summary={
+            key: np.asarray(value)
+            for key, value in dHdq_summary.items()
         },
-        "profiles": profile_plot_data,
-        "metrics_rows": metrics_rows,
-    }
+    )
 
-    for profile_config in profile_configs:
-        required_keys = (
-            "stiffness_profile",
-            "row_label",
-            "num_hinges",
-            "matched_spatial_kernel",
-            "train_sample_fraction",
+
+def run_seed_worker(job: SeedJob) -> RunResult:
+    """
+    Execute one independent seed.
+
+    The simulator object is reconstructed inside the process instead of
+    being transferred between processes. The precomputed reference arrays
+    are reused, so the reference PDE does not need to be solved again.
+    """
+    simulator = SoftRodSimulator(
+        **job.pipeline_config.simulator.simulator_kwargs()
+    )
+
+    simulation = SimulationBundle(
+        simulator=simulator,
+        training_data=job.training_data,
+        evaluation_data=job.evaluation_data,
+    )
+
+    return run_pipeline(
+        pipeline_config=job.pipeline_config,
+        seed=job.seed,
+        simulation=simulation,
+    )
+
+
+def run_model_over_seeds(
+    pipeline_config: PipelineConfig,
+    seeds: Sequence[int],
+    simulation: SimulationBundle | None = None,
+    parallel_config: ParallelConfig | None = None,
+) -> AggregateResult:
+    """
+    Compute one model configuration over several random seeds.
+
+    Seed jobs are executed sequentially when parallel execution is disabled
+    and in separate processes otherwise.
+    """
+    if not seeds:
+        raise ValueError(
+            "At least one seed must be provided."
         )
 
-        missing_keys = [
-            key
-            for key in required_keys
-            if key not in profile_config
-        ]
-
-        if missing_keys:
-            raise KeyError(
-                "Profile configuration is missing required keys: "
-                f"{missing_keys}"
-            )
-
-        stiffness_profile = profile_config[
-            "stiffness_profile"
-        ]
-        row_label = profile_config["row_label"]
-        num_hinges = profile_config["num_hinges"]
-        matched_kernel = profile_config[
-            "matched_spatial_kernel"
-        ]
-        profile_train_fraction = profile_config[
-            "train_sample_fraction"
-        ]
-
-        if not 0.0 < profile_train_fraction <= 1.0:
-            raise ValueError(
-                "train_sample_fraction must lie in (0, 1], "
-                f"but received {profile_train_fraction} for "
-                f"'{stiffness_profile}'."
-            )
-
-        print("\n" + "=" * 100)
-        print(f"STIFFNESS PROFILE: {stiffness_profile}")
-        print(
-            "TRAINING FRACTION: "
-            f"{profile_train_fraction:.4f}"
-        )
-        print("=" * 100)
-
-        model_configs = [
-            {
-                "label": "Baseline",
-                "kernel_type": baseline_kernel_type,
-                "spatial_kernel": "rbf",
-            },
-            {
-                "label": "SD-RBF",
-                "kernel_type": sd_kernel_type,
-                "spatial_kernel": "rbf",
-            },
-            {
-                "label": "SD-matched",
-                "kernel_type": sd_kernel_type,
-                "spatial_kernel": matched_kernel,
-            },
-        ]
-
-        profile_model_results = {}
-        profile_models_for_plot = []
-
-        reference_z = None
-        reference_dz = None
-        reference_dt = None
-        reference_q_true = None
-        reference_u_true = None
-
-        for model_config in model_configs:
-            label = model_config["label"]
-            kernel_type = model_config["kernel_type"]
-            spatial_kernel = model_config[
-                "spatial_kernel"
-            ]
-
-            print("\n" + "#" * 80)
-            print(
-                f"{row_label}: "
-                f"{label}, "
-                f"kernel_type={kernel_type}, "
-                f"spatial_kernel={spatial_kernel}, "
-                f"train_sample_fraction="
-                f"{profile_train_fraction}"
-            )
-            print("#" * 80)
-
-            config_param_dict = copy.deepcopy(param_dict)
-
-            config_param_dict[
-                "stiffness_profile"
-            ] = stiffness_profile
-            config_param_dict[
-                "num_hinges"
-            ] = num_hinges
-            config_param_dict[
-                "spatial_kernel"
-            ] = spatial_kernel
-
-            for key, value in profile_config.get(
-                "extra_params",
-                {},
-            ).items():
-                config_param_dict[key] = value
-
-            results = run_pipeline_multiple_seeds(
-                param_dict=config_param_dict,
-                seeds=seeds,
-                kernel_type=kernel_type,
-                train_sample_fraction=(
-                    profile_train_fraction
-                ),
-                sampling=sampling,
-                make_individual_plots=False,
-                plot_average_rollout=False,
-                plot_average_error_curves=False,
-                plot_average_heatmap=False,
-                time_slices=time_slices,
-                save_average_plot=False,
-                q_growth_failure_threshold=(
-                    q_growth_failure_threshold
-                ),
-                edge=edge,
-            )
-
-            profile_model_results[label] = results
-
-            reference_output = results["all_outputs"][0]
-            simulator = reference_output["simulator"]
-            test_data = reference_output["test_data"]
-
-            z_current = np.asarray(
-                simulator.z,
-                dtype=float,
-            ).copy()
-
-            dz_current = float(simulator.dz)
-            dt_current = float(simulator.dt)
-
-            q_true_current = np.asarray(
-                test_data["q"],
-                dtype=float,
-            ).copy()
-
-            u_true_current = (
-                np.cumsum(
-                    q_true_current,
-                    axis=0,
-                )
-                * dz_current
-            )
-
-            if reference_z is None:
-                reference_z = z_current
-                reference_dz = dz_current
-                reference_dt = dt_current
-                reference_q_true = q_true_current
-                reference_u_true = u_true_current
-
-            else:
-                if not np.allclose(
-                    z_current,
-                    reference_z,
-                ):
-                    raise ValueError(
-                        "The spatial grids differ between model "
-                        f"configurations for '{stiffness_profile}'."
-                    )
-
-                if q_true_current.shape != (
-                    reference_q_true.shape
-                ):
-                    raise ValueError(
-                        "The ground-truth trajectory shapes differ "
-                        "between model configurations for "
-                        f"'{stiffness_profile}'."
-                    )
-
-                if not np.allclose(
-                    q_true_current,
-                    reference_q_true,
-                ):
-                    raise ValueError(
-                        "The ground-truth trajectories differ "
-                        "between model configurations for "
-                        f"'{stiffness_profile}'."
-                    )
-
-            q_gp_mean = np.asarray(
-                results["q_gp_mean"],
-                dtype=float,
-            ).copy()
-
-            if q_gp_mean.shape != reference_q_true.shape:
-                raise ValueError(
-                    f"Shape mismatch for {stiffness_profile}, "
-                    f"{label}: q_gp_mean has shape "
-                    f"{q_gp_mean.shape}, while q_true has shape "
-                    f"{reference_q_true.shape}."
-                )
-
-            u_gp_mean = (
-                np.cumsum(
-                    q_gp_mean,
-                    axis=0,
-                )
-                * reference_dz
-            )
-
-            profile_models_for_plot.append(
-                {
-                    "label": label,
-                    "kernel_type": kernel_type,
-                    "spatial_kernel": spatial_kernel,
-                    "q_gp_mean": q_gp_mean,
-                    "u_gp_mean": u_gp_mean,
-                }
-            )
-
-            metric_row = {
-                "stiffness_profile": stiffness_profile,
-                "row_label": row_label,
-                "train_sample_fraction": (
-                    profile_train_fraction
-                ),
-                "model": label,
-                "kernel_type": kernel_type,
-                "spatial_kernel": spatial_kernel,
-                **results["avg_metrics"],
-                "failure_rate": results[
-                    "failure_stats"
-                ]["failure_rate"],
-                "q_growth_ratio_mean": results[
-                    "failure_stats"
-                ]["q_growth_ratio_mean"],
-            }
-
-            metrics_rows.append(metric_row)
-
-        combined_results[stiffness_profile] = {
-            "train_sample_fraction": (
-                profile_train_fraction
-            ),
-            "matched_spatial_kernel": matched_kernel,
-            "model_results": profile_model_results,
-        }
-
-        profile_plot_data.append(
-            {
-                "stiffness_profile": stiffness_profile,
-                "row_label": row_label,
-                "num_hinges": num_hinges,
-                "train_sample_fraction": (
-                    profile_train_fraction
-                ),
-                "matched_spatial_kernel": matched_kernel,
-                "z": reference_z,
-                "dz": reference_dz,
-                "dt": reference_dt,
-                "q_true": reference_q_true,
-                "u_true": reference_u_true,
-                "models": profile_models_for_plot,
-            }
+    if simulation is None:
+        simulation = create_simulation_bundle(
+            pipeline_config.simulator
         )
 
-        # Save after every completed profile so that lengthy
-        # computations are preserved incrementally.
-        _save_pickle_atomic(
-            plot_artifact,
-            save_plot_data_path,
+    parallel_config = (
+        parallel_config
+        or ParallelConfig(enabled=False)
+    )
+
+    progress_description = (
+        f"{pipeline_config.model.label} seeds"
+    )
+
+    # Sequential execution.
+    if (
+        not parallel_config.enabled
+        or len(seeds) == 1
+    ):
+        runs = tuple(
+            run_pipeline(
+                pipeline_config=pipeline_config,
+                seed=seed,
+                simulation=simulation,
+            )
+            for seed in tqdm(
+                seeds,
+                total=len(seeds),
+                desc=progress_description,
+                unit="seed",
+            )
         )
 
-        print(
-            "[SAVED] Rollout plotting data updated at "
-            f"'{save_plot_data_path}'."
+        return aggregate_run_results(runs)
+
+    max_workers, torch_threads = (
+        resolve_parallel_resources(
+            parallel_config,
+            number_of_jobs=len(seeds),
         )
+    )
 
     print(
-        "\n[SUCCESS] All rollout computations completed. "
-        f"Plotting data saved to '{save_plot_data_path}'."
+        f"\nRunning {len(seeds)} seeds using "
+        f"{max_workers} processes and "
+        f"{torch_threads} Torch threads per process."
     )
+
+    training_data = {
+        key: np.asarray(value)
+        for key, value in simulation.training_data.items()
+    }
+
+    evaluation_data = {
+        key: np.asarray(value)
+        for key, value in simulation.evaluation_data.items()
+    }
+
+    jobs = [
+        SeedJob(
+            pipeline_config=pipeline_config,
+            seed=seed,
+            training_data=training_data,
+            evaluation_data=evaluation_data,
+        )
+        for seed in seeds
+    ]
+
+    context = mp.get_context(
+        parallel_config.start_method
+    )
+
+    results_by_seed: dict[int, RunResult] = {}
+
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=context,
+        initializer=initialize_seed_worker,
+        initargs=(torch_threads,),
+    ) as executor:
+        future_to_seed: dict[
+            Future[RunResult],
+            int,
+        ] = {
+            executor.submit(
+                run_seed_worker,
+                job,
+            ): job.seed
+            for job in jobs
+        }
+
+        current_seed: int | str = "unknown"
+
+        try:
+            completed_futures = as_completed(
+                future_to_seed
+            )
+
+            for future in tqdm(
+                completed_futures,
+                total=len(future_to_seed),
+                desc=progress_description,
+                unit="seed",
+            ):
+                current_seed = future_to_seed[future]
+
+                result = future.result()
+                results_by_seed[current_seed] = result
+
+                # Optional: display completed seeds without
+                # corrupting the progress bar.
+                tqdm.write(
+                    f"[COMPLETED] "
+                    f"{pipeline_config.model.label}, "
+                    f"seed={current_seed}"
+                )
+
+        except Exception as error:
+            for submitted_future in future_to_seed:
+                submitted_future.cancel()
+
+            raise RuntimeError(
+                "Parallel run failed for seed "
+                f"{current_seed}."
+            ) from error
+
+    # Restore the user-specified seed order.
+    runs = tuple(
+        results_by_seed[seed]
+        for seed in seeds
+    )
+
+    return aggregate_run_results(runs)
+
+
+def compute_mean_diagnostic_curves(
+        aggregate: AggregateResult,
+        edge: int,
+) -> dict[str, np.ndarray]:
+    """Average time-dependent effort and force errors over seeds."""
+    dHdq_rmse_curves: list[np.ndarray] = []
+    force_rmse_curves: list[np.ndarray] = []
+
+    for run in aggregate.runs:
+        summary = run.dHdq_summary
+        n_z, n_t = run.q_gp.shape
+        interior = slice(edge, n_z - edge)
+        dHdq_pred = np.asarray(summary["dHdq_mean"]).reshape(n_z, n_t)
+        dHdq_true = np.asarray(summary["dHdq_true"]).reshape(n_z, n_t)
+        force_pred = np.asarray(summary["dHdq_force_pred"]).reshape(n_z, n_t)
+        force_true = np.asarray(summary["dHdq_force_true"]).reshape(n_z, n_t)
+
+        dHdq_rmse_curves.append(
+            np.sqrt(np.nanmean((dHdq_pred[interior] - dHdq_true[interior]) ** 2, axis=0))
+        )
+        force_rmse_curves.append(
+            np.sqrt(np.nanmean((force_pred[interior] - force_true[interior]) ** 2, axis=0))
+        )
+
+    dt = aggregate.runs[0].pipeline_config.simulator.dt
+    return {
+        "t": np.arange(aggregate.q_gp_mean.shape[1]) * dt,
+        "dHdq_rmse_t": np.mean(np.stack(dHdq_rmse_curves), axis=0),
+        "force_rmse_t": np.mean(np.stack(force_rmse_curves), axis=0),
+    }
+
+
+def aggregate_to_artifact_model(
+        aggregate: AggregateResult,
+        evaluation_config: EvaluationConfig,
+) -> dict[str, Any]:
+    """Strip nonportable GP objects from an aggregate result."""
+    return {
+        "model_label": aggregate.model_label,
+        "model_config": aggregate.runs[0].pipeline_config.model.to_dict(),
+        "seeds": tuple(run.seed for run in aggregate.runs),
+        "mean_metrics": dict(aggregate.mean_metrics),
+        "std_metrics": dict(aggregate.std_metrics),
+        "per_seed_metrics": {
+            run.seed: extract_selected_metrics(run.metrics)
+            for run in aggregate.runs
+        },
+        "p_gp_mean": np.asarray(aggregate.p_gp_mean),
+        "p_gp_std": np.asarray(aggregate.p_gp_std),
+        "q_gp_mean": np.asarray(aggregate.q_gp_mean),
+        "q_gp_std": np.asarray(aggregate.q_gp_std),
+        "mean_diagnostic_curves": compute_mean_diagnostic_curves(
+            aggregate,
+            evaluation_config.force_edge,
+        ),
+    }
+
+
+def build_artifact_profile(
+        experiment: ExperimentSpec,
+        model_results: Mapping[str, AggregateResult],
+        simulation: SimulationBundle,
+        training_config: TrainingConfig,
+        evaluation_config: EvaluationConfig,
+) -> dict[str, Any]:
+    simulator = simulation.simulator
+    evaluation_data = simulation.evaluation_data
+
+    q_reference = np.asarray(
+        evaluation_data["q"]
+    )
+
+    return {
+        "name": experiment.name,
+        "row_label": experiment.row_label,
+        "simulator_config": (
+            experiment.simulator.to_dict()
+        ),
+        "sampling_config": (
+            experiment.sampling.to_dict()
+        ),
+        "training_config": (
+            training_config.to_dict()
+        ),
+        "evaluation_config": (
+            evaluation_config.to_dict()
+        ),
+        "z": np.asarray(simulator.z),
+        "dz": float(simulator.dz),
+        "dt": float(simulator.dt),
+        "t": np.asarray(
+            evaluation_data.get(
+                "t",
+                np.arange(q_reference.shape[1])
+                * simulator.dt,
+            )
+        ),
+        "p_reference": np.asarray(
+            evaluation_data["p"]
+        ),
+        "q_reference": q_reference,
+        "u_reference": (
+            reconstruct_displacement_from_strain(
+                q_reference,
+                simulator,
+            )
+        ),
+        "models": {
+            label: aggregate_to_artifact_model(
+                result,
+                evaluation_config,
+            )
+            for label, result
+            in model_results.items()
+        },
+    }
+
+
+def save_experiment_artifact(
+        artifact: Mapping[str, Any],
+        save_path: str | Path,
+) -> None:
+    """Atomically save a model-free computation artifact."""
+    path = Path(save_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+
+    with temporary_path.open("wb") as file:
+        pickle.dump(dict(artifact), file, protocol=pickle.HIGHEST_PROTOCOL)
+
+    temporary_path.replace(path)
+
+
+def run_experiment_matrix(
+        experiment_specs: Sequence[ExperimentSpec],
+        save_results_path: str | Path,
+        training_config: TrainingConfig | None = None,
+        evaluation_config: EvaluationConfig | None = None,
+        parallel_config: ParallelConfig | None = None,
+) -> dict[str, dict[str, AggregateResult]]:
+    """
+    Compute a profile/model/seed matrix and save plotting-ready data.
+
+    The artifact is updated after every completed profile, so plotting can be
+    performed later without loading GP models or rerunning training.
+    """
+    training_config = training_config or TrainingConfig()
+    evaluation_config = evaluation_config or EvaluationConfig()
+    parallel_config = (
+            parallel_config
+            or ParallelConfig(enabled=False)
+    )
+    results: dict[str, dict[str, AggregateResult]] = {}
+    simulation_cache: dict[tuple[object, ...], SimulationBundle] = {}
+
+    artifact: dict[str, Any] = {
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "experiment_order": [],
+        "experiments": {},
+    }
+
+    for experiment in experiment_specs:
+        cache_key = experiment.simulator.cache_key()
+        simulation = simulation_cache.get(cache_key)
+        if simulation is None:
+            print("\n" + "#" * 88)
+            print(f"Generating reference data for {experiment.name}")
+            print("#" * 88)
+            simulation = create_simulation_bundle(experiment.simulator)
+            simulation_cache[cache_key] = simulation
+
+        model_results: dict[str, AggregateResult] = {}
+        for model in experiment.models:
+            pipeline_config = PipelineConfig(
+                simulator=experiment.simulator,
+                model=model,
+                sampling=experiment.sampling,
+                training=training_config,
+                evaluation=evaluation_config,
+            )
+            model_results[model.label] = run_model_over_seeds(
+                pipeline_config,
+                experiment.seeds,
+                simulation,
+                parallel_config=parallel_config,
+            )
+
+        results[experiment.name] = model_results
+        artifact["experiment_order"].append(experiment.name)
+        artifact["experiments"][experiment.name] = build_artifact_profile(
+            experiment=experiment,
+            model_results=model_results,
+            simulation=simulation,
+            training_config=training_config,
+            evaluation_config=evaluation_config,
+        )
+        save_experiment_artifact(artifact, save_results_path)
+        print(f"[SAVED] Computation artifact updated at '{save_results_path}'.")
+
+    return results
+
+
+def print_aggregate_table(
+        results: Mapping[str, Mapping[str, AggregateResult]],
+) -> None:
+    columns = (
+        "q_rel_l2",
+        "u_rel_l2",
+        "energy_rel_l2",
+        "curl_rms",
+        "dHdq_rmse",
+        "dHdq_force_rmse",
+    )
+    header = (
+            f"{'Experiment':<16} {'Model':<14} "
+            + " ".join(f"{column:>17}" for column in columns)
+    )
+    print("\n" + header)
+    print("-" * len(header))
+
+    for experiment_name, model_results in results.items():
+        for model_label, aggregate in model_results.items():
+            values = " ".join(
+                f"{aggregate.mean_metrics[column]:>9.3e}±"
+                f"{aggregate.std_metrics[column]:<7.1e}"
+                for column in columns
+            )
+            print(f"{experiment_name:<16} {model_label:<14} {values}")
+
+
+def build_paper_experiments(
+        seeds: tuple[int, ...] = (6, 42, 79, 123, 456),
+) -> tuple[ExperimentSpec, ...]:
+    baseline = ModelConfig(
+        label="Baseline",
+        kernel_type="baseline",
+        spatial_kernel="rbf",
+    )
+    sd_rbf = ModelConfig(
+        label="SD-RBF",
+        kernel_type="SD",
+        spatial_kernel="rbf",
+    )
+    common_simulator = {"L": 10.0, "N": 60, "T": 5.5, "dt": 0.05}
+    common_sampling = {
+        "method": "stratified",
+        "left_region": (0.0, 2.0),
+        "middle_region": (2.0, 8.0),
+        "right_region": (8.0, 10.0),
+        "weights": (0.30, 0.40, 0.30),
+        "include_domain_boundaries": True,
+    }
 
     return (
-        combined_results,
-        plot_artifact,
-        metrics_rows,
-    )
-
-
-def plot_stiffness(stiffness_param_arr):
-    import matplotlib.pyplot as plt
-
-    fig, axs = plt.subplots(len(stiffness_param_arr), 1, figsize=(8, 10), sharex=False)
-    for i, (stiffness, num_hinges) in enumerate(stiffness_param_arr):
-        sim = SoftRodSimulator(L=10.0, N=500, T=5.5, dt=0.05, num_hinges=num_hinges,
-                               stiffness_profile=stiffness)
-        z = sim.z
-        k = sim.stiffness
-
-        axs[i].plot(z, k)
-        axs[i].set_ylabel("Stiffness k(z)")
-
-    axs[-1].set_xlabel("z")
-    for ax in axs:
-        ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-    fig.savefig(
-        "./plots/stiffness_profile.pdf",
-        dpi=300,
-        bbox_inches="tight",
-    )
-
-
-
-def run_diagnostic(param_dict, kernel_type="baseline"):
-    sim = SoftRodSimulator(L=10.0, N=60, T=5.5, dt=0.05, num_hinges=param_dict["num_hinges"],
-                           stiffness_profile=param_dict["stiffness_profile"])
-    data = sim.generate_dataset(get_train_q_config)
-
-    # p_flat = data['p'].flatten()
-    # q_flat = data['q'].flatten()
-    # dH_dq_target = data['dH_dq'].flatten()
-    # dH_dp_target = data['dH_dp'].flatten()
-    #
-    # # Tile the spatial array to match the time dimension, then flatten
-    # N_pts, T_steps = data['q'].shape
-    # z_tiled = np.tile(data['z'].reshape(N_pts, 1), (1, T_steps))
-    # z_flat = z_tiled.flatten()
-    #
-    # # X matrix is now shape [N_total, 3] -> (p, q, z)
-    # X = np.stack([p_flat, q_flat, z_flat], axis=1)
-    #
-    # downscale_factor = 0.1
-    # num_train = int(X.shape[0] * downscale_factor)
-    # rng = np.random.default_rng(seed=42)
-    # train_idx = rng.choice(X.shape[0], size=num_train, replace=False)
-    #
-    # X_train = torch.tensor(X[train_idx], dtype=torch.float64)
-    # y_dEdp_train = torch.tensor(dH_dp_target[train_idx], dtype=torch.float64)
-    # y_dEdq_train = torch.tensor(dH_dq_target[train_idx], dtype=torch.float64)
-    #
-    # # Z-Score Normalization
-    # X_mean, X_std = X_train.mean(dim=0), X_train.std(dim=0)
-    # X_train_norm = (X_train - X_mean) / (X_std + 1e-6)
-    #
-    # y_p_mean, y_p_std = y_dEdp_train.mean(), y_dEdp_train.std()
-    # y_p_train_norm = (y_dEdp_train - y_p_mean) / (y_p_std + 1e-6)
-    #
-    # y_q_mean, y_q_std = y_dEdq_train.mean(), y_dEdq_train.std()
-    # y_q_train_norm = (y_dEdq_train - y_q_mean) / (y_q_std + 1e-6)
-    #
-    # dEdp_model, dEdp_lh = train_gp_model(X_train_norm, y_p_train_norm, param_dict, kernel_type="baseline",
-    #                                      training_iter=1000, patience=15)
-    # dEdq_model, dEdq_lh = train_gp_model(X_train_norm, y_q_train_norm, param_dict, kernel_type=kernel_type,
-    #                                      training_iter=1000, patience=15)
-    #
-    # # Store normalization stats directly on the models for easy access in utils.py
-    # dEdp_model.X_mean, dEdp_model.X_std = X_mean, X_std
-    # dEdp_model.y_mean, dEdp_model.y_std = y_p_mean, y_p_std
-    # dEdq_model.X_mean, dEdq_model.X_std = X_mean, X_std
-    # dEdq_model.y_mean, dEdq_model.y_std = y_q_mean, y_q_std
-    #
-    # p_gp, q_gp = simulate_gp_phs(sim, dEdp_model, dEdq_model, get_test_q_config)
-    # test_data = sim.generate_dataset(get_test_q_config)
-
-    stiffness_activity_diagnostic(data, sim)
-    # ph_force_diagnostic(data, sim)
-    # gradient_error_by_z(data, sim, dEdq_model)
-    # plot_q_dHdq_force_diagnostic(test_data, p_gp, q_gp, sim, dEdq_model, time_steps=(31, 32, 33))
-    # plot_boundary_vs_interior_q(q_gp, test_data, sim)
-    # scan_rollout_rhs_error(test_data, p_gp, q_gp, sim, dEdq_model, dpdt_bad_threshold=0.6)
-    # for step in [30, 31, 32]:
-    #     inspect_rhs_at_step(test_data, p_gp, q_gp, sim, dEdq_model, step)
-
-
-if __name__ == '__main__':
-    param_dict = {
-        "stiffness_profile": "piecewise",
-        "num_hinges": 2,
-        "strain_kernel": "rbf",
-        "spatial_kernel": "changepoint",
-        "matern_nu": 2.5,
-        "changepoint_location": 5.0,
-        "changepoint_width": 0.15,
-        "n_freqs": 10
-    }
-
-    profile_configs = [
-        {
-            "stiffness_profile": "periodic",
-            "row_label": "Periodic",
-            "num_hinges": 4,
-            "matched_spatial_kernel": "periodic",
-            "train_sample_fraction": 0.06,
-        },
-        {
-            "stiffness_profile": "C2",
-            "row_label": r"$C^2$ bumps",
-            "num_hinges": 8,
-            "matched_spatial_kernel": "matern",
-            "train_sample_fraction": 0.06,
-            "extra_params": {
-                "matern_nu": 2.5,
-            },
-        },
-        {
-            "stiffness_profile": "piecewise",
-            "row_label": "Semi-piecewise",
-            "num_hinges": 2,
-            "matched_spatial_kernel": "changepoint",
-            "train_sample_fraction": 0.04,
-            "extra_params": {
-                "changepoint_location": 5.0,
-                "changepoint_width": 0.15
-            },
-        },
-    ]
-
-    stiffness_param_arr = [("periodic", 4), ("C2", 8), ("piecewise", 2)]
-
-    plot_stiffness(stiffness_param_arr)
-
-    # combined_results, plot_artifact, metrics_rows = (
-    #     run_all_profiles_with_rollout_grid(
-    #         param_dict=param_dict,
-    #         profile_configs=profile_configs,
-    #         seeds=(6, 42, 79, 123, 456),
-    #         sampling="stratified",
-    #         time_slices=(0, 50, 100),
-    #         q_growth_failure_threshold=3.0,
-    #         edge=5,
-    #         save_plot_data_path=(
-    #             "./data/all_profiles_rollout_data.pkl"
-    #         ),
-    #     )
-    # )
-
-    plot_info = load_rollout_plot_data(
-        "./data/all_profiles_rollout_data.pkl"
-    )
-
-    plot_multi_profile_rollout_grid(
-        profile_results=plot_info["profiles"],
-        time_slices=(0, 50, 100),
-        save_path=(
-            "./plots/all_profiles_rollout_grid.pdf"
+        ExperimentSpec(
+            name="periodic",
+            row_label="Periodic",
+            simulator=SimulatorConfig(
+                **common_simulator,
+                stiffness_profile="periodic",
+                num_hinges=4,
+            ),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.06),
+            models=(
+                baseline,
+                sd_rbf,
+                ModelConfig(
+                    label="SD-matched",
+                    kernel_type="SD",
+                    spatial_kernel="periodic",
+                ),
+            ),
+            seeds=seeds,
         ),
-        figsize=(12.0, 8.0),
+        ExperimentSpec(
+            name="C2",
+            row_label=r"$C^2$ bumps",
+            simulator=SimulatorConfig(
+                **common_simulator,
+                stiffness_profile="C2",
+                num_hinges=8,
+            ),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.06),
+            models=(
+                baseline,
+                sd_rbf,
+                ModelConfig(
+                    label="SD-matched",
+                    kernel_type="SD",
+                    spatial_kernel="matern",
+                    matern_nu=2.5,
+                ),
+            ),
+            seeds=seeds,
+        ),
+        ExperimentSpec(
+            name="piecewise",
+            row_label="Semi-piecewise",
+            simulator=SimulatorConfig(
+                **common_simulator,
+                stiffness_profile="piecewise",
+                num_hinges=2,
+            ),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
+            models=(
+                baseline,
+                sd_rbf,
+                ModelConfig(
+                    label="SD-matched",
+                    kernel_type="SD",
+                    spatial_kernel="changepoint",
+                    changepoint_location=5.0,
+                    changepoint_width=0.15,
+                ),
+            ),
+            seeds=seeds,
+        ),
     )
-    # ("periodic", 4, "baseline", "rbf"), ("periodic", 4, "SD", "rbf"), ("periodic", 4, "SD", "periodic"),
-    # ("periodic", 4, "SD", "warped"), ("periodic", 4, "warped", "rbf")
-    # ("C2", 8, "baseline", "rbf"), ("C2", 8, "SD", "rbf"), ("C2", 8, "SD", "matern")
-    # ("piecewise", 2, "baseline", "rbf"), ("piecewise", 2, "SD", "rbf"),
-    # ("piecewise", 2, "SD", "matern"), ("piecewise", 2, "SD", "changepoint")
-    # test_config = [("piecewise", 2, "baseline", "rbf"), ("piecewise", 2, "SD", "rbf"),
-    #                ("piecewise", 2, "SD", "matern"), ("piecewise", 2, "SD", "changepoint")]
-    # param_dict = {
-    #     "stiffness_profile": "piecewise",
-    #     "num_hinges": 2,
-    #     "strain_kernel": "rbf",
-    #     "spatial_kernel": "changepoint",
-    #     "matern_nu": 2.5,
-    #     "changepoint_location": 5.0,
-    #     "changepoint_width": 0.15,
-    #     "n_freqs": 10
-    # }
-    # run_model_configurations_with_overlay(param_dict, test_config, seeds=(6, 42, 79, 123, 456),
-    #                                       sampling="stratified", train_sample_fraction=0.04, add_plt_title=False)
-    # metrics_table = []
-    # for stif_profile, num_hinges, kernel, spatial_kernel in test_config:
-    #     print(f"CONFIG: {stif_profile} stiffness profile, {num_hinges} bumps/hinges, {kernel} kernel, {spatial_kernel} spatial kernel")
-    #     param_dict["stiffness_profile"] = stif_profile
-    #     param_dict["num_hinges"] = num_hinges
-    #     param_dict["spatial_kernel"] = spatial_kernel
-    #     results = run_pipeline_multiple_seeds(param_dict, seeds=(6, 42, 79, 123, 456), kernel_type=kernel,
-    #                             sampling="stratified", train_sample_fraction=0.06)
-    #     metric_summary = [results["avg_metrics"][key] for key in results["avg_metrics"]]
-    #     metric_summary.append(results["failure_stats"]["failure_rate"])
-    #     metric_summary.append(results["failure_stats"]["q_growth_ratio_mean"])
-    #     metrics_table.append(metric_summary)
-    #
-    # print_metrics_table(metrics_table)
 
-    # run_pipeline_multiple_seeds(param_dict, seeds=(6, 42, 79, 123, 456), kernel_type="baseline",
-    #                             sampling="stratified", train_sample_fraction=0.06)
-    # run_pipeline(param_dict, kernel_type="SD", sampling="stratified", seed=79,
-    #              train_sample_fraction=0.04, verbose=True, make_plots=True)
-    # run_diagnostic(param_dict)
+
+def compute_main_experiment(
+        save_results_path: str | Path = (
+                "./data/paper_experiment.pkl"
+        ),
+        parallel_config: ParallelConfig | None = None,
+) -> dict[str, dict[str, AggregateResult]]:
+    """Run the paper experiment and save data required for later plots."""
+    parallel_config = (
+            parallel_config or ParallelConfig(enabled=True, max_workers=5,
+                                              torch_threads_per_worker=None, start_method="spawn",)
+    )
+
+    results = run_experiment_matrix(
+        experiment_specs=build_paper_experiments(),
+        save_results_path=save_results_path,
+        parallel_config=parallel_config,
+    )
+
+    print_aggregate_table(results)
+    return results
+
+
+if __name__ == "__main__":
+    compute_main_experiment(save_results_path="./data/paper_experiment.pkl")

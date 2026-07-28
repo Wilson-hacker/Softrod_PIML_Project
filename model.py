@@ -22,7 +22,8 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
         elif kernel_type == "SD":
             from kernels import StructuralDecoupledKernel
             strain_kernel, spatial_kernel = param_dict["strain_kernel"], param_dict["spatial_kernel"]
-            self.covar_module = StructuralDecoupledKernel(param_dict, strain_kernel_type=strain_kernel, spatial_kernel_type=spatial_kernel)
+            self.covar_module = StructuralDecoupledKernel(param_dict, strain_kernel_type=strain_kernel,
+                                                          spatial_kernel_type=spatial_kernel)
         elif kernel_type == "warped":
             from kernels import GibbsStateKernel
             self.covar_module = GibbsStateKernel(param_dict)
@@ -35,7 +36,8 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
 
-def train_gp_model(train_x, train_y, param_dict, kernel_type="baseline", training_iter=1000, patience=5, min_delta=1e-3, verbose=False):
+def train_gp_model(train_x, train_y, param_dict, kernel_type="baseline", training_iter=1000, patience=5, min_delta=1e-3,
+                   verbose=False):
     """
     Handles the PyTorch optimization loop for the GP with an embedded early-stopping mechanism.
 
@@ -66,7 +68,8 @@ def train_gp_model(train_x, train_y, param_dict, kernel_type="baseline", trainin
     best_likelihood_state = None
     patience_counter = 0
 
-    print(f"Beginning GP training with Early Stopping (Patience: {patience}, Min Delta: {min_delta})")
+    if verbose:
+        print(f"Beginning GP training with Early Stopping (Patience: {patience}, Min Delta: {min_delta})")
 
     for i in range(training_iter):
         optimizer.zero_grad()
@@ -94,7 +97,7 @@ def train_gp_model(train_x, train_y, param_dict, kernel_type="baseline", trainin
 
         # Trigger termination if patience threshold is breached
         if patience_counter >= patience:
-            print(f'==> Early stopping triggered at iteration {i + 1}. Restoring best loss state: {best_loss:.3f}')
+            if verbose: print(f'==> Early stopping triggered at iteration {i + 1}. Restoring best loss state: {best_loss:.3f}')
             # Rollback parameters to the best historical checkpoint
             model.load_state_dict(best_model_state)
             likelihood.load_state_dict(best_likelihood_state)

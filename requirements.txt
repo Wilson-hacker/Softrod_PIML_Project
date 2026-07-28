@@ -6,3 +6,6 @@ matplotlib
 # GP-PHS Pipeline
 torch
 gpytorch
+
+# Utilities
+tqdm
