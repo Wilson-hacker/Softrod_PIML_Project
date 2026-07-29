@@ -23,6 +23,7 @@ class SimulatorConfig:
     dt: float = 0.05
     stiffness_profile: str = "periodic"
     num_hinges: int = 4
+    profile_seed: int = 42
     extra_kwargs: tuple[tuple[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
@@ -36,6 +37,8 @@ class SimulatorConfig:
             raise ValueError("dt must satisfy 0 < dt < T.")
         if self.num_hinges < 0:
             raise ValueError("num_hinges cannot be negative.")
+        if self.profile_seed < 0:
+            raise ValueError("profile_seed must be nonnegative.")
 
     def simulator_kwargs(self) -> dict[str, Any]:
         kwargs = {
@@ -45,6 +48,7 @@ class SimulatorConfig:
             "dt": self.dt,
             "stiffness_profile": self.stiffness_profile,
             "num_hinges": self.num_hinges,
+            "profile_seed": self.profile_seed,
         }
         kwargs.update(dict(self.extra_kwargs))
         return kwargs
@@ -57,6 +61,7 @@ class SimulatorConfig:
             self.dt,
             self.stiffness_profile,
             self.num_hinges,
+            self.profile_seed,
             self.extra_kwargs,
         )
 

@@ -11,47 +11,47 @@ def periodic_stiffness(num_hinges, length, z_arr):
     return 10.0 + 4.0 * np.cos(2 * hinge_freq * z_arr)
 
 
-# def c2_less_smooth_stiffness(num_bumps, length, z_arr, base=10.0, amp=4.0, radius=None):
-#     """
-#     Less-smooth but still C^2 stiffness profile using compactly supported
-#     Wendland C^2 basis functions.
-#
-#     Regularity: C^2, but generally not C^3.
-#     Useful for testing Matérn kernels with finite smoothness assumptions.
-#
-#     k(z) = base + amp * normalized_sum_of_C2_bumps(z)
-#     """
-#     z_arr = np.asarray(z_arr)
-#
-#     if radius is None:
-#         radius = 0.5 * length / num_bumps
-#
-#     centers = np.linspace(0.1 * length, 0.9 * length, num_bumps)
-#
-#     # Alternating bump amplitudes to create spatial heterogeneity.
-#     weights = np.array([(-1.0) ** i for i in range(num_bumps)])
-#
-#     profile = np.zeros_like(z_arr, dtype=float)
-#
-#     for center, weight in zip(centers, weights):
-#         r = np.abs(z_arr - center) / radius
-#
-#         # Wendland C^2 function in 1D:
-#         # phi(r) = (1-r)^4_+ (4r+1)
-#         phi = np.where(
-#             r < 1.0,
-#             (1.0 - r) ** 4 * (4.0 * r + 1.0),
-#             0.0,
-#         )
-#
-#         profile += weight * phi
-#
-#     # Normalize to roughly [-1, 1] before scaling.
-#     max_abs = np.max(np.abs(profile))
-#     if max_abs > 1e-12:
-#         profile = profile / max_abs
-#
-#     return base + amp * profile
+def periodic_c2_bumps(num_bumps, length, z_arr, base=10.0, amp=4.0, radius=None):
+    """
+    Less-smooth but still C^2 stiffness profile using compactly supported
+    Wendland C^2 basis functions.
+
+    Regularity: C^2, but generally not C^3.
+    Useful for testing Matérn kernels with finite smoothness assumptions.
+
+    k(z) = base + amp * normalized_sum_of_C2_bumps(z)
+    """
+    z_arr = np.asarray(z_arr)
+
+    if radius is None:
+        radius = 0.5 * length / num_bumps
+
+    centers = np.linspace(0.1 * length, 0.9 * length, num_bumps)
+
+    # Alternating bump amplitudes to create spatial heterogeneity.
+    weights = np.array([(-1.0) ** i for i in range(num_bumps)])
+
+    profile = np.zeros_like(z_arr, dtype=float)
+
+    for center, weight in zip(centers, weights):
+        r = np.abs(z_arr - center) / radius
+
+        # Wendland C^2 function in 1D:
+        # phi(r) = (1-r)^4_+ (4r+1)
+        phi = np.where(
+            r < 1.0,
+            (1.0 - r) ** 4 * (4.0 * r + 1.0),
+            0.0,
+        )
+
+        profile += weight * phi
+
+    # Normalize to roughly [-1, 1] before scaling.
+    max_abs = np.max(np.abs(profile))
+    if max_abs > 1e-12:
+        profile = profile / max_abs
+
+    return base + amp * profile
 
 
 def c2_multiscale_stiffness(
@@ -232,7 +232,8 @@ def sharp_transition_stiffness(length, z_arr, low=6.0, high=14.0, center=None, w
 
 
 class SoftRodSimulator:
-    def __init__(self, L=10.0, N=100, T=5.0, dt=0.01, num_hinges=4, stiffness_profile="periodic"):
+    def __init__(self, L=10.0, N=100, T=5.0, dt=0.01, num_hinges=4,
+                 stiffness_profile="periodic", profile_seed=42):
         self.L = L
         self.N = N
         self.T = T
@@ -240,14 +241,17 @@ class SoftRodSimulator:
         self.z = np.linspace(0, L, N)
         self.dz = self.z[1] - self.z[0]
         self.damping = 0.05
+        self.profile_seed = profile_seed
 
         # Geometry: varying stiffness k(z) for "thin hinges"
         if stiffness_profile == "periodic":
             self.stiffness = periodic_stiffness(num_hinges, L, self.z)
+        elif stiffness_profile == "periodic bumps":
+            self.stiffness = periodic_c2_bumps(num_hinges, L, self.z)
         elif stiffness_profile == "constant":
             self.stiffness = const_stiffness(self.z)
         elif stiffness_profile == "C2":
-            self.stiffness = c2_multiscale_stiffness(num_hinges, L, self.z)
+            self.stiffness = c2_multiscale_stiffness(num_hinges, L, self.z, seed=self.profile_seed)
         elif stiffness_profile == "piecewise":
             self.stiffness = piecewise_stiffness(num_hinges, L, self.z)
         elif stiffness_profile == "sharp":

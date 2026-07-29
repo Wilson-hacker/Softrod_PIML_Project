@@ -53,6 +53,7 @@ from sampling import (
     prepare_training_dataset,
     seed_everything,
 )
+from report import print_aggregate_table
 from simulator import SoftRodSimulator
 
 
@@ -673,34 +674,6 @@ def run_experiment_matrix(
     return results
 
 
-def print_aggregate_table(
-        results: Mapping[str, Mapping[str, AggregateResult]],
-) -> None:
-    columns = (
-        "q_rel_l2",
-        "u_rel_l2",
-        "energy_rel_l2",
-        "curl_rms",
-        "dHdq_rmse",
-        "dHdq_force_rmse",
-    )
-    header = (
-            f"{'Experiment':<16} {'Model':<14} "
-            + " ".join(f"{column:>17}" for column in columns)
-    )
-    print("\n" + header)
-    print("-" * len(header))
-
-    for experiment_name, model_results in results.items():
-        for model_label, aggregate in model_results.items():
-            values = " ".join(
-                f"{aggregate.mean_metrics[column]:>9.3e}±"
-                f"{aggregate.std_metrics[column]:<7.1e}"
-                for column in columns
-            )
-            print(f"{experiment_name:<16} {model_label:<14} {values}")
-
-
 def build_paper_experiments(
         seeds: tuple[int, ...] = (6, 42, 79, 123, 456),
 ) -> tuple[ExperimentSpec, ...]:
@@ -714,7 +687,7 @@ def build_paper_experiments(
         kernel_type="SD",
         spatial_kernel="rbf",
     )
-    common_simulator = {"L": 10.0, "N": 60, "T": 5.5, "dt": 0.05}
+    common_simulator = {"L": 10.0, "N": 60, "T": 5.5, "dt": 0.05, "profile_seed": 42}
     common_sampling = {
         "method": "stratified",
         "left_region": (0.0, 2.0),
@@ -814,4 +787,4 @@ def compute_main_experiment(
 
 
 if __name__ == "__main__":
-    compute_main_experiment(save_results_path="./data/paper_experiment.pkl")
+    compute_main_experiment(save_results_path="./data/paper_experiment2.pkl")
