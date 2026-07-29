@@ -127,7 +127,7 @@ def plot_profile_overlay_from_artifact(
             raise IndexError(f"Time step {step} is out of bounds.")
 
         axis = axes[axis_index]
-        reference_line, = axis.plot(
+        (reference_line,) = axis.plot(
             z,
             u_reference[:, step],
             label="Numerical solution",
@@ -141,7 +141,7 @@ def plot_profile_overlay_from_artifact(
                 np.asarray(model["q_gp_mean"]),
                 dz,
             )
-            line, = axis.plot(
+            (line,) = axis.plot(
                 z,
                 u_prediction[:, step],
                 linestyle="--",
@@ -202,7 +202,7 @@ def plot_multi_profile_rollout_grid_from_artifact(
                 )
 
             axis = axes[row, column]
-            reference_line, = axis.plot(
+            (reference_line,) = axis.plot(
                 z,
                 u_reference[:, step],
                 label="Numerical solution",
@@ -214,7 +214,7 @@ def plot_multi_profile_rollout_grid_from_artifact(
                     np.asarray(model["q_gp_mean"]),
                     dz,
                 )
-                line, = axis.plot(
+                (line,) = axis.plot(
                     z,
                     u_prediction[:, step],
                     linestyle="--",

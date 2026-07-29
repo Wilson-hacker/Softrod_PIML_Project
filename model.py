@@ -1,106 +1,146 @@
+from __future__ import annotations
+
+import copy
+import math
+
 import gpytorch
 import torch
-import copy
+
+from config import ModelConfig, TrainingConfig
+from kernels import build_kernel
 
 
 class EnergyGradientGP(gpytorch.models.ExactGP):
-    """
-    Learns the gradient of the Hamiltonian w.r.t state variables.
-    You will instantiate two of these: one for dE/dp, one for dE/dq.
-    """
+    """Exact GP model for one Hamiltonian effort component."""
 
-    def __init__(self, train_x, train_y, likelihood, param_dict, kernel_type="baseline"):
-        super(EnergyGradientGP, self).__init__(train_x, train_y, likelihood)
-        self.mean_module = gpytorch.means.ZeroMean()  # Physics prior: assume 0 energy gradient initially
+    def __init__(
+        self,
+        train_x: torch.Tensor,
+        train_y: torch.Tensor,
+        likelihood: gpytorch.likelihoods.GaussianLikelihood,
+        model_config: ModelConfig,
+    ):
+        super().__init__(train_x, train_y, likelihood)
+        self.mean_module = gpytorch.means.ZeroMean()
+        self.covar_module = build_kernel(model_config)
 
-        if kernel_type == "baseline":
-            from kernels import BaselineRBFKernel
-            self.covar_module = BaselineRBFKernel()
-        elif kernel_type == "P_only":
-            from kernels import MomentumKernel
-            self.covar_module = MomentumKernel()
-        elif kernel_type == "SD":
-            from kernels import StructuralDecoupledKernel
-            strain_kernel, spatial_kernel = param_dict["strain_kernel"], param_dict["spatial_kernel"]
-            self.covar_module = StructuralDecoupledKernel(param_dict, strain_kernel_type=strain_kernel,
-                                                          spatial_kernel_type=spatial_kernel)
-        elif kernel_type == "warped":
-            from kernels import GibbsStateKernel
-            self.covar_module = GibbsStateKernel(param_dict)
-        else:
-            raise ValueError("Unknown kernel type")
-
-    def forward(self, x):
-        mean_x = self.mean_module(x)
-        covar_x = self.covar_module(x)
-        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+    def forward(self, x: torch.Tensor):
+        mean = self.mean_module(x)
+        covariance = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean, covariance)
 
 
-def train_gp_model(train_x, train_y, param_dict, kernel_type="baseline", training_iter=1000, patience=5, min_delta=1e-3,
-                   verbose=False):
-    """
-    Handles the PyTorch optimization loop for the GP with an embedded early-stopping mechanism.
+def train_gp_model(
+    train_x: torch.Tensor,
+    train_y: torch.Tensor,
+    model_config: ModelConfig,
+    training_config: TrainingConfig,
+) -> tuple[
+    EnergyGradientGP,
+    gpytorch.likelihoods.GaussianLikelihood,
+]:
+    """Train one exact GP with early stopping and best-state restoration."""
+    if train_x.ndim != 2:
+        raise ValueError("train_x must have shape (N, D).")
+    if train_y.ndim != 1:
+        raise ValueError("train_y must have shape (N,).")
+    if train_x.shape[0] != train_y.shape[0]:
+        raise ValueError("train_x and train_y must contain the same samples.")
+    if not torch.isfinite(train_x).all() or not torch.isfinite(train_y).all():
+        raise ValueError("Training data contains nonfinite values.")
 
-    Args:
-        train_x: Training inputs (p, q tensors)
-        train_y: Training targets (integrated spatial derivatives)
-        kernel_type: String identifier for the kernel architecture
-        training_iter: Maximum optimization steps allowed
-        patience: Number of iterations to wait for improvement before killing the loop
-        min_delta: Minimum reduction in loss to qualify as an improvement
-    """
-    likelihood = gpytorch.likelihoods.GaussianLikelihood()
-    model = EnergyGradientGP(train_x, train_y, likelihood, param_dict, kernel_type)
+    likelihood = gpytorch.likelihoods.GaussianLikelihood().to(device=train_x.device)
+    model = EnergyGradientGP(
+        train_x=train_x,
+        train_y=train_y,
+        likelihood=likelihood,
+        model_config=model_config,
+    ).to(device=train_x.device)
 
-    # Enable training mode
     model.train()
     likelihood.train()
 
-    # Use the adam optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=training_config.learning_rate,
+    )
+    marginal_log_likelihood = gpytorch.mlls.ExactMarginalLogLikelihood(
+        likelihood,
+        model,
+    )
 
-    # "Loss" for GPs - the marginal log likelihood
-    mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
-
-    # Early stopping tracking variables
-    best_loss = float('inf')
+    best_loss = math.inf
+    best_iteration = -1
     best_model_state = None
     best_likelihood_state = None
     patience_counter = 0
 
-    if verbose:
-        print(f"Beginning GP training with Early Stopping (Patience: {patience}, Min Delta: {min_delta})")
+    if training_config.verbose:
+        print(
+            "Beginning GP training "
+            f"(model={model_config.label!r}, "
+            f"patience={training_config.patience}, "
+            f"min_delta={training_config.min_delta})."
+        )
 
-    for i in range(training_iter):
-        optimizer.zero_grad()
+    for iteration in range(training_config.training_iter):
+        optimizer.zero_grad(set_to_none=True)
+
         output = model(train_x)
-        loss = -mll(output, train_y)
+        loss = -marginal_log_likelihood(output, train_y)
+
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"Nonfinite GP loss at iteration {iteration + 1}."
+            )
+
         loss.backward()
         optimizer.step()
 
-        current_loss = loss.item()
+        current_loss = float(loss.detach().cpu())
 
-        # Print status updates every 10 iterations
-        if (i + 1) % 20 == 0 and verbose:
-            print(f'Iter {i + 1}/{training_iter} - Loss: {current_loss:.3f}')
+        if (
+            training_config.verbose
+            and (iteration + 1) % training_config.log_interval == 0
+        ):
+            print(
+                f"Iter {iteration + 1}/{training_config.training_iter} "
+                f"- Loss: {current_loss:.6f}"
+            )
 
-        # --- Early Stopping Logic ---
-        # Check if the current loss improved significantly past our best recorded loss
-        if current_loss < best_loss - min_delta:
+        if current_loss < best_loss - training_config.min_delta:
             best_loss = current_loss
-            # Save a deep copy checkpoint of the optimal parameters
+            best_iteration = iteration
             best_model_state = copy.deepcopy(model.state_dict())
             best_likelihood_state = copy.deepcopy(likelihood.state_dict())
-            patience_counter = 0  # Reset counter since we found a better state
+            patience_counter = 0
         else:
             patience_counter += 1
 
-        # Trigger termination if patience threshold is breached
-        if patience_counter >= patience:
-            if verbose: print(f'==> Early stopping triggered at iteration {i + 1}. Restoring best loss state: {best_loss:.3f}')
-            # Rollback parameters to the best historical checkpoint
-            model.load_state_dict(best_model_state)
-            likelihood.load_state_dict(best_likelihood_state)
+        if patience_counter >= training_config.patience:
+            if training_config.verbose:
+                print(
+                    "Early stopping at iteration "
+                    f"{iteration + 1}; restoring iteration "
+                    f"{best_iteration + 1} with loss {best_loss:.6f}."
+                )
             break
+
+    if best_model_state is None or best_likelihood_state is None:
+        raise RuntimeError("GP training did not produce a valid checkpoint.")
+
+    # Restore the best checkpoint whether training stopped early or reached
+    # the maximum iteration count.
+    model.load_state_dict(best_model_state)
+    likelihood.load_state_dict(best_likelihood_state)
+
+    model.eval()
+    likelihood.eval()
+
+    if training_config.verbose:
+        print(
+            f"Restored best checkpoint from iteration {best_iteration + 1} "
+            f"with loss {best_loss:.6f}."
+        )
 
     return model, likelihood

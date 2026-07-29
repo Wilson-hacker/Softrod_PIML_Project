@@ -20,7 +20,6 @@ from rollout import (
     tensor_to_numpy,
 )
 
-
 SELECTED_METRIC_PATHS: dict[str, tuple[str, ...]] = {
     "q_rel_l2": ("rollout", "q_rel_l2"),
     "u_rel_l2": ("rollout", "u_rel_l2"),
@@ -37,9 +36,7 @@ SELECTED_METRIC_PATHS: dict[str, tuple[str, ...]] = {
 
 def relative_l2(prediction: np.ndarray, reference: np.ndarray) -> float:
     denominator = np.linalg.norm(reference.reshape(-1)) + 1e-12
-    return float(
-        np.linalg.norm((prediction - reference).reshape(-1)) / denominator
-    )
+    return float(np.linalg.norm((prediction - reference).reshape(-1)) / denominator)
 
 
 def rmse(prediction: np.ndarray, reference: np.ndarray) -> float:
@@ -154,9 +151,7 @@ def compute_curl_integrability_error(
         mean_q = model_mean_physical(dEdq_model, X_q)
         gradient_q = torch.autograd.grad(mean_q.sum(), X_q)[0]
 
-        curl_batches.append(
-            tensor_to_numpy(gradient_p[:, 1] - gradient_q[:, 0])
-        )
+        curl_batches.append(tensor_to_numpy(gradient_p[:, 1] - gradient_q[:, 0]))
 
     curl = np.concatenate(curl_batches)
     return {
@@ -212,9 +207,7 @@ def compute_single_calibration_metrics(
     residual = y_reference - mean
     z_score = residual / standard_deviation
     nlpd = 0.5 * np.mean(
-        z_score**2
-        + 2.0 * np.log(standard_deviation)
-        + np.log(2.0 * np.pi)
+        z_score**2 + 2.0 * np.log(standard_deviation) + np.log(2.0 * np.pi)
     )
 
     return {
@@ -258,9 +251,7 @@ def compute_dHdq_force_metrics_from_predictions(
         force_prediction_int[finite_mask],
         force_reference_int[finite_mask],
     )
-    force_reference_rms = float(
-        np.sqrt(np.nanmean(force_reference_int**2)) + 1e-12
-    )
+    force_reference_rms = float(np.sqrt(np.nanmean(force_reference_int**2)) + 1e-12)
 
     return (
         {
@@ -414,9 +405,13 @@ def aggregate_run_results(runs: Sequence[RunResult]) -> AggregateResult:
         mean_metrics=mean_metrics,
         std_metrics=std_metrics,
         p_gp_mean=p_stack.mean(axis=0),
-        p_gp_std=p_stack.std(axis=0, ddof=1) if len(runs) > 1 else np.zeros_like(p_stack[0]),
+        p_gp_std=p_stack.std(axis=0, ddof=1)
+        if len(runs) > 1
+        else np.zeros_like(p_stack[0]),
         q_gp_mean=q_stack.mean(axis=0),
-        q_gp_std=q_stack.std(axis=0, ddof=1) if len(runs) > 1 else np.zeros_like(q_stack[0]),
+        q_gp_std=q_stack.std(axis=0, ddof=1)
+        if len(runs) > 1
+        else np.zeros_like(q_stack[0]),
     )
 
 

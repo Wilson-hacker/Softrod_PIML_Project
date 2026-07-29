@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import pickle
+import sys
 from concurrent.futures import (
     Future,
     ProcessPoolExecutor,
     as_completed,
 )
-from tqdm.auto import tqdm
-import torch
-import pickle
-import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+import torch
+from tqdm.auto import tqdm
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -26,15 +27,15 @@ from config import (
     ExperimentSpec,
     InitialCondition,
     ModelConfig,
+    ParallelConfig,
     PipelineConfig,
     RunResult,
     SamplingConfig,
+    SeedJob,
     SimulationBundle,
     SimulatorConfig,
     TrainedModels,
     TrainingConfig,
-    ParallelConfig,
-    SeedJob,
 )
 from metrics import (
     aggregate_run_results,
@@ -43,6 +44,7 @@ from metrics import (
     print_metrics_report,
 )
 from model import train_gp_model
+from report import print_aggregate_table
 from rollout import (
     attach_normalization_stats,
     reconstruct_displacement_from_strain,
@@ -53,18 +55,17 @@ from sampling import (
     prepare_training_dataset,
     seed_everything,
 )
-from report import print_aggregate_table
 from simulator import SoftRodSimulator
 
 
 def default_initial_q(z: np.ndarray, length: float) -> np.ndarray:
     """Initial strain profile used in the paper experiments."""
     center = length / 2.0
-    return -4.0 * (z - center) * np.exp(-(z - center) ** 2)
+    return -4.0 * (z - center) * np.exp(-((z - center) ** 2))
 
 
 def initialize_seed_worker(
-        torch_threads: int,
+    torch_threads: int,
 ) -> None:
     """
     Configure CPU threading inside one worker process.
@@ -82,8 +83,8 @@ def initialize_seed_worker(
 
 
 def resolve_parallel_resources(
-        parallel_config: ParallelConfig,
-        number_of_jobs: int,
+    parallel_config: ParallelConfig,
+    number_of_jobs: int,
 ) -> tuple[int, int]:
     """
     Determine the number of processes and Torch threads per process.
@@ -110,20 +111,18 @@ def resolve_parallel_resources(
             available_cpus // max_workers,
         )
     else:
-        torch_threads = (
-            parallel_config.torch_threads_per_worker
-        )
+        torch_threads = parallel_config.torch_threads_per_worker
 
     return max_workers, torch_threads
 
 
 def create_simulation_bundle(
-        config: SimulatorConfig,
-        training_initial_condition: InitialCondition = default_initial_q,
-        evaluation_initial_condition: InitialCondition | None = None,
+    config: SimulatorConfig,
+    training_initial_condition: InitialCondition = default_initial_q,
+    evaluation_initial_condition: InitialCondition | None = None,
 ) -> SimulationBundle:
     """Generate deterministic reference trajectories once per simulator setup."""
-    simulator = SoftRodSimulator(**config.simulator_kwargs())
+    simulator = SoftRodSimulator(config)
     training_data = simulator.generate_dataset(training_initial_condition)
     evaluation_data = (
         training_data
@@ -138,10 +137,10 @@ def create_simulation_bundle(
 
 
 def get_training_dataset(
-        simulation: SimulationBundle,
-        sampling_config: SamplingConfig,
-        training_config: TrainingConfig,
-        seed: int,
+    simulation: SimulationBundle,
+    sampling_config: SamplingConfig,
+    training_config: TrainingConfig,
+    seed: int,
 ) -> DatasetBundle:
     """Prepare one seed's exact training set, held-out set, and targets."""
     return prepare_training_dataset(
@@ -152,50 +151,57 @@ def get_training_dataset(
     )
 
 
-def normalized_model_parameters(
-        pipeline_config: PipelineConfig,
-        dataset: DatasetBundle,
-) -> dict[str, object]:
-    params = pipeline_config.model.training_params(pipeline_config.simulator)
-    if (
-            pipeline_config.model.kernel_type == "SD"
-            and pipeline_config.model.spatial_kernel == "changepoint"
+def resolve_model_config(
+    model_config: ModelConfig,
+    dataset: DatasetBundle,
+) -> ModelConfig:
+    if not (
+        model_config.kernel_type == "SD"
+        and model_config.spatial_kernel == "changepoint"
     ):
-        location, width = normalize_changepoint_params(
-            location_physical=pipeline_config.model.changepoint_location,
-            width_physical=pipeline_config.model.changepoint_width,
-            normalization=dataset.normalization,
-        )
-        params["changepoint_location"] = location
-        params["changepoint_width"] = width
-    return params
+        return model_config
+
+    location, width = normalize_changepoint_params(
+        location_physical=model_config.changepoint_location,
+        width_physical=model_config.changepoint_width,
+        normalization=dataset.normalization,
+    )
+
+    return replace(
+        model_config,
+        changepoint_location=location,
+        changepoint_width=width,
+    )
 
 
 def train_effort_models(
-        pipeline_config: PipelineConfig,
-        dataset: DatasetBundle,
+    pipeline_config: PipelineConfig,
+    dataset: DatasetBundle,
 ) -> TrainedModels:
-    """Train the momentum- and constitutive-effort GP models."""
-    model_params = normalized_model_parameters(pipeline_config, dataset)
-    training = pipeline_config.training
+    training_config = pipeline_config.training
+
+    dEdp_config = ModelConfig(
+        label=f"{pipeline_config.model.label}-dHdp",
+        kernel_type="baseline",
+    )
+
+    dEdq_config = resolve_model_config(
+        pipeline_config.model,
+        dataset,
+    )
 
     dEdp_model, dEdp_likelihood = train_gp_model(
-        dataset.X_train_norm,
-        dataset.y_p_train_norm,
-        model_params,
-        kernel_type="baseline",
-        training_iter=training.training_iter,
-        patience=training.patience,
-        verbose=training.verbose,
+        train_x=dataset.X_train_norm,
+        train_y=dataset.y_p_train_norm,
+        model_config=dEdp_config,
+        training_config=training_config,
     )
+
     dEdq_model, dEdq_likelihood = train_gp_model(
-        dataset.X_train_norm,
-        dataset.y_q_train_norm,
-        model_params,
-        kernel_type=pipeline_config.model.kernel_type,
-        training_iter=training.training_iter,
-        patience=training.patience,
-        verbose=training.verbose,
+        train_x=dataset.X_train_norm,
+        train_y=dataset.y_q_train_norm,
+        model_config=dEdq_config,
+        training_config=training_config,
     )
 
     models = TrainedModels(
@@ -204,16 +210,21 @@ def train_effort_models(
         dEdq_model=dEdq_model,
         dEdq_likelihood=dEdq_likelihood,
     )
-    attach_normalization_stats(models, dataset.normalization)
+
+    attach_normalization_stats(
+        models,
+        dataset.normalization,
+    )
+
     return models
 
 
 def run_pipeline(
-        pipeline_config: PipelineConfig,
-        seed: int = 42,
-        simulation: SimulationBundle | None = None,
-        training_initial_condition: InitialCondition = default_initial_q,
-        evaluation_initial_condition: InitialCondition | None = None,
+    pipeline_config: PipelineConfig,
+    seed: int = 42,
+    simulation: SimulationBundle | None = None,
+    training_initial_condition: InitialCondition = default_initial_q,
+    evaluation_initial_condition: InitialCondition | None = None,
 ) -> RunResult:
     """Compute one model/seed result. This function never creates plots."""
     seed_everything(seed)
@@ -277,9 +288,7 @@ def run_pipeline(
         print_metrics_report(metrics)
 
     return RunResult(
-        experiment_name=(
-            pipeline_config.simulator.stiffness_profile
-        ),
+        experiment_name=(pipeline_config.simulator.stiffness_profile),
         model_label=pipeline_config.model.label,
         seed=seed,
         pipeline_config=pipeline_config,
@@ -288,10 +297,7 @@ def run_pipeline(
         q_gp=np.asarray(q_gp),
         H_reference=np.asarray(H_reference),
         H_gp=np.asarray(H_gp),
-        dHdq_summary={
-            key: np.asarray(value)
-            for key, value in dHdq_summary.items()
-        },
+        dHdq_summary={key: np.asarray(value) for key, value in dHdq_summary.items()},
     )
 
 
@@ -303,9 +309,7 @@ def run_seed_worker(job: SeedJob) -> RunResult:
     being transferred between processes. The precomputed reference arrays
     are reused, so the reference PDE does not need to be solved again.
     """
-    simulator = SoftRodSimulator(
-        **job.pipeline_config.simulator.simulator_kwargs()
-    )
+    simulator = SoftRodSimulator(job.pipeline_config.simulator)
 
     simulation = SimulationBundle(
         simulator=simulator,
@@ -333,29 +337,17 @@ def run_model_over_seeds(
     and in separate processes otherwise.
     """
     if not seeds:
-        raise ValueError(
-            "At least one seed must be provided."
-        )
+        raise ValueError("At least one seed must be provided.")
 
     if simulation is None:
-        simulation = create_simulation_bundle(
-            pipeline_config.simulator
-        )
+        simulation = create_simulation_bundle(pipeline_config.simulator)
 
-    parallel_config = (
-        parallel_config
-        or ParallelConfig(enabled=False)
-    )
+    parallel_config = parallel_config or ParallelConfig(enabled=False)
 
-    progress_description = (
-        f"{pipeline_config.model.label} seeds"
-    )
+    progress_description = f"{pipeline_config.model.label} seeds"
 
     # Sequential execution.
-    if (
-        not parallel_config.enabled
-        or len(seeds) == 1
-    ):
+    if not parallel_config.enabled or len(seeds) == 1:
         runs = tuple(
             run_pipeline(
                 pipeline_config=pipeline_config,
@@ -372,11 +364,9 @@ def run_model_over_seeds(
 
         return aggregate_run_results(runs)
 
-    max_workers, torch_threads = (
-        resolve_parallel_resources(
-            parallel_config,
-            number_of_jobs=len(seeds),
-        )
+    max_workers, torch_threads = resolve_parallel_resources(
+        parallel_config,
+        number_of_jobs=len(seeds),
     )
 
     print(
@@ -386,13 +376,11 @@ def run_model_over_seeds(
     )
 
     training_data = {
-        key: np.asarray(value)
-        for key, value in simulation.training_data.items()
+        key: np.asarray(value) for key, value in simulation.training_data.items()
     }
 
     evaluation_data = {
-        key: np.asarray(value)
-        for key, value in simulation.evaluation_data.items()
+        key: np.asarray(value) for key, value in simulation.evaluation_data.items()
     }
 
     jobs = [
@@ -405,9 +393,7 @@ def run_model_over_seeds(
         for seed in seeds
     ]
 
-    context = mp.get_context(
-        parallel_config.start_method
-    )
+    context = mp.get_context(parallel_config.start_method)
 
     results_by_seed: dict[int, RunResult] = {}
 
@@ -431,9 +417,7 @@ def run_model_over_seeds(
         current_seed: int | str = "unknown"
 
         try:
-            completed_futures = as_completed(
-                future_to_seed
-            )
+            completed_futures = as_completed(future_to_seed)
 
             for future in tqdm(
                 completed_futures,
@@ -446,12 +430,8 @@ def run_model_over_seeds(
                 result = future.result()
                 results_by_seed[current_seed] = result
 
-                # Optional: display completed seeds without
-                # corrupting the progress bar.
                 tqdm.write(
-                    f"[COMPLETED] "
-                    f"{pipeline_config.model.label}, "
-                    f"seed={current_seed}"
+                    f"[COMPLETED] {pipeline_config.model.label}, seed={current_seed}"
                 )
 
         except Exception as error:
@@ -459,22 +439,18 @@ def run_model_over_seeds(
                 submitted_future.cancel()
 
             raise RuntimeError(
-                "Parallel run failed for seed "
-                f"{current_seed}."
+                f"Parallel run failed for seed {current_seed}."
             ) from error
 
     # Restore the user-specified seed order.
-    runs = tuple(
-        results_by_seed[seed]
-        for seed in seeds
-    )
+    runs = tuple(results_by_seed[seed] for seed in seeds)
 
     return aggregate_run_results(runs)
 
 
 def compute_mean_diagnostic_curves(
-        aggregate: AggregateResult,
-        edge: int,
+    aggregate: AggregateResult,
+    edge: int,
 ) -> dict[str, np.ndarray]:
     """Average time-dependent effort and force errors over seeds."""
     dHdq_rmse_curves: list[np.ndarray] = []
@@ -490,10 +466,14 @@ def compute_mean_diagnostic_curves(
         force_true = np.asarray(summary["dHdq_force_true"]).reshape(n_z, n_t)
 
         dHdq_rmse_curves.append(
-            np.sqrt(np.nanmean((dHdq_pred[interior] - dHdq_true[interior]) ** 2, axis=0))
+            np.sqrt(
+                np.nanmean((dHdq_pred[interior] - dHdq_true[interior]) ** 2, axis=0)
+            )
         )
         force_rmse_curves.append(
-            np.sqrt(np.nanmean((force_pred[interior] - force_true[interior]) ** 2, axis=0))
+            np.sqrt(
+                np.nanmean((force_pred[interior] - force_true[interior]) ** 2, axis=0)
+            )
         )
 
     dt = aggregate.runs[0].pipeline_config.simulator.dt
@@ -505,8 +485,8 @@ def compute_mean_diagnostic_curves(
 
 
 def aggregate_to_artifact_model(
-        aggregate: AggregateResult,
-        evaluation_config: EvaluationConfig,
+    aggregate: AggregateResult,
+    evaluation_config: EvaluationConfig,
 ) -> dict[str, Any]:
     """Strip nonportable GP objects from an aggregate result."""
     return {
@@ -516,8 +496,7 @@ def aggregate_to_artifact_model(
         "mean_metrics": dict(aggregate.mean_metrics),
         "std_metrics": dict(aggregate.std_metrics),
         "per_seed_metrics": {
-            run.seed: extract_selected_metrics(run.metrics)
-            for run in aggregate.runs
+            run.seed: extract_selected_metrics(run.metrics) for run in aggregate.runs
         },
         "p_gp_mean": np.asarray(aggregate.p_gp_mean),
         "p_gp_std": np.asarray(aggregate.p_gp_std),
@@ -531,47 +510,34 @@ def aggregate_to_artifact_model(
 
 
 def build_artifact_profile(
-        experiment: ExperimentSpec,
-        model_results: Mapping[str, AggregateResult],
-        simulation: SimulationBundle,
-        training_config: TrainingConfig,
-        evaluation_config: EvaluationConfig,
+    experiment: ExperimentSpec,
+    model_results: Mapping[str, AggregateResult],
+    simulation: SimulationBundle,
+    training_config: TrainingConfig,
+    evaluation_config: EvaluationConfig,
 ) -> dict[str, Any]:
     simulator = simulation.simulator
     evaluation_data = simulation.evaluation_data
 
-    q_reference = np.asarray(
-        evaluation_data["q"]
-    )
+    q_reference = np.asarray(evaluation_data["q"])
 
     return {
         "name": experiment.name,
         "row_label": experiment.row_label,
-        "simulator_config": (
-            experiment.simulator.to_dict()
-        ),
-        "sampling_config": (
-            experiment.sampling.to_dict()
-        ),
-        "training_config": (
-            training_config.to_dict()
-        ),
-        "evaluation_config": (
-            evaluation_config.to_dict()
-        ),
+        "simulator_config": (experiment.simulator.to_dict()),
+        "sampling_config": (experiment.sampling.to_dict()),
+        "training_config": (training_config.to_dict()),
+        "evaluation_config": (evaluation_config.to_dict()),
         "z": np.asarray(simulator.z),
         "dz": float(simulator.dz),
         "dt": float(simulator.dt),
         "t": np.asarray(
             evaluation_data.get(
                 "t",
-                np.arange(q_reference.shape[1])
-                * simulator.dt,
+                np.arange(q_reference.shape[1]) * simulator.dt,
             )
         ),
-        "p_reference": np.asarray(
-            evaluation_data["p"]
-        ),
+        "p_reference": np.asarray(evaluation_data["p"]),
         "q_reference": q_reference,
         "u_reference": (
             reconstruct_displacement_from_strain(
@@ -584,15 +550,14 @@ def build_artifact_profile(
                 result,
                 evaluation_config,
             )
-            for label, result
-            in model_results.items()
+            for label, result in model_results.items()
         },
     }
 
 
 def save_experiment_artifact(
-        artifact: Mapping[str, Any],
-        save_path: str | Path,
+    artifact: Mapping[str, Any],
+    save_path: str | Path,
 ) -> None:
     """Atomically save a model-free computation artifact."""
     path = Path(save_path)
@@ -606,11 +571,11 @@ def save_experiment_artifact(
 
 
 def run_experiment_matrix(
-        experiment_specs: Sequence[ExperimentSpec],
-        save_results_path: str | Path,
-        training_config: TrainingConfig | None = None,
-        evaluation_config: EvaluationConfig | None = None,
-        parallel_config: ParallelConfig | None = None,
+    experiment_specs: Sequence[ExperimentSpec],
+    save_results_path: str | Path,
+    training_config: TrainingConfig | None = None,
+    evaluation_config: EvaluationConfig | None = None,
+    parallel_config: ParallelConfig | None = None,
 ) -> dict[str, dict[str, AggregateResult]]:
     """
     Compute a profile/model/seed matrix and save plotting-ready data.
@@ -620,10 +585,7 @@ def run_experiment_matrix(
     """
     training_config = training_config or TrainingConfig()
     evaluation_config = evaluation_config or EvaluationConfig()
-    parallel_config = (
-            parallel_config
-            or ParallelConfig(enabled=False)
-    )
+    parallel_config = parallel_config or ParallelConfig(enabled=False)
     results: dict[str, dict[str, AggregateResult]] = {}
     simulation_cache: dict[tuple[object, ...], SimulationBundle] = {}
 
@@ -675,7 +637,7 @@ def run_experiment_matrix(
 
 
 def build_paper_experiments(
-        seeds: tuple[int, ...] = (6, 42, 79, 123, 456),
+    seeds: tuple[int, ...] = (6, 42, 79, 123, 456),
 ) -> tuple[ExperimentSpec, ...]:
     baseline = ModelConfig(
         label="Baseline",
@@ -765,15 +727,15 @@ def build_paper_experiments(
 
 
 def compute_main_experiment(
-        save_results_path: str | Path = (
-                "./data/paper_experiment.pkl"
-        ),
-        parallel_config: ParallelConfig | None = None,
+    save_results_path: str | Path = ("./data/paper_experiment.pkl"),
+    parallel_config: ParallelConfig | None = None,
 ) -> dict[str, dict[str, AggregateResult]]:
     """Run the paper experiment and save data required for later plots."""
-    parallel_config = (
-            parallel_config or ParallelConfig(enabled=True, max_workers=5,
-                                              torch_threads_per_worker=None, start_method="spawn",)
+    parallel_config = parallel_config or ParallelConfig(
+        enabled=True,
+        max_workers=5,
+        torch_threads_per_worker=None,
+        start_method="spawn",
     )
 
     results = run_experiment_matrix(
@@ -787,4 +749,4 @@ def compute_main_experiment(
 
 
 if __name__ == "__main__":
-    compute_main_experiment(save_results_path="./data/paper_experiment2.pkl")
+    compute_main_experiment(save_results_path="./data/paper_experiment_consistent_scaling.pkl")

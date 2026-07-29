@@ -6,10 +6,26 @@ from typing import Any, Callable, Literal, Mapping
 import numpy as np
 import torch
 
-
 ARTIFACT_SCHEMA_VERSION = 2
 
 SamplingMethod = Literal["random", "stratified"]
+KernelType = Literal["baseline", "P_only", "SD", "warped"]
+StrainKernelType = Literal["rbf", "linear"]
+SpatialKernelType = Literal[
+    "rbf",
+    "periodic",
+    "matern",
+    "changepoint",
+    "warped",
+]
+StiffnessProfile = Literal[
+    "constant",
+    "periodic",
+    "periodic bumps",
+    "C2",
+    "piecewise",
+    "sharp",
+]
 InitialCondition = Callable[[np.ndarray, float], np.ndarray]
 
 
@@ -21,10 +37,10 @@ class SimulatorConfig:
     N: int = 60
     T: float = 5.5
     dt: float = 0.05
-    stiffness_profile: str = "periodic"
+    stiffness_profile: StiffnessProfile = "periodic"
     num_hinges: int = 4
+    damping: float = 0.05
     profile_seed: int = 42
-    extra_kwargs: tuple[tuple[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if self.L <= 0.0:
@@ -35,25 +51,15 @@ class SimulatorConfig:
             raise ValueError("T must be positive.")
         if self.dt <= 0.0 or self.dt >= self.T:
             raise ValueError("dt must satisfy 0 < dt < T.")
-        if self.num_hinges < 0:
-            raise ValueError("num_hinges cannot be negative.")
+        if self.num_hinges <= 0:
+            raise ValueError("num_hinges must be positive.")
+        if self.damping < 0.0:
+            raise ValueError("damping cannot be negative.")
         if self.profile_seed < 0:
             raise ValueError("profile_seed must be nonnegative.")
 
-    def simulator_kwargs(self) -> dict[str, Any]:
-        kwargs = {
-            "L": self.L,
-            "N": self.N,
-            "T": self.T,
-            "dt": self.dt,
-            "stiffness_profile": self.stiffness_profile,
-            "num_hinges": self.num_hinges,
-            "profile_seed": self.profile_seed,
-        }
-        kwargs.update(dict(self.extra_kwargs))
-        return kwargs
-
     def cache_key(self) -> tuple[Any, ...]:
+        """Return a hashable identity for deterministic simulation caching."""
         return (
             self.L,
             self.N,
@@ -61,27 +67,36 @@ class SimulatorConfig:
             self.dt,
             self.stiffness_profile,
             self.num_hinges,
+            self.damping,
             self.profile_seed,
-            self.extra_kwargs,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return self.simulator_kwargs()
+        """Serialize the configuration for experiment artifacts."""
+        return {
+            "L": self.L,
+            "N": self.N,
+            "T": self.T,
+            "dt": self.dt,
+            "stiffness_profile": self.stiffness_profile,
+            "num_hinges": self.num_hinges,
+            "damping": self.damping,
+            "profile_seed": self.profile_seed,
+        }
 
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """Configuration of one GP-PHS model variant."""
+    """Configuration of one GP-PHS covariance architecture."""
 
     label: str
-    kernel_type: str = "baseline"
-    strain_kernel: str = "rbf"
-    spatial_kernel: str = "rbf"
+    kernel_type: KernelType = "baseline"
+    strain_kernel: StrainKernelType = "rbf"
+    spatial_kernel: SpatialKernelType = "rbf"
     matern_nu: float = 2.5
     changepoint_location: float = 5.0
     changepoint_width: float = 0.15
     n_freqs: int = 10
-    extra_params: tuple[tuple[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.label.strip():
@@ -93,22 +108,16 @@ class ModelConfig:
         if self.n_freqs <= 0:
             raise ValueError("n_freqs must be positive.")
 
-    def training_params(self, simulator: SimulatorConfig) -> dict[str, Any]:
-        """Build the parameter mapping expected by train_gp_model()."""
-        params = {
-            "stiffness_profile": simulator.stiffness_profile,
-            "num_hinges": simulator.num_hinges,
-            "strain_kernel": self.strain_kernel,
-            "spatial_kernel": self.spatial_kernel,
-            "matern_nu": self.matern_nu,
-            "changepoint_location": self.changepoint_location,
-            "changepoint_width": self.changepoint_width,
-            "n_freqs": self.n_freqs,
-        }
-        params.update(dict(self.extra_params))
-        return params
+        if self.kernel_type != "SD" and self.spatial_kernel not in {
+            "rbf",
+            "warped",
+        }:
+            raise ValueError(
+                "Non-SD models should not specify a matched spatial kernel."
+            )
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the configuration for experiment artifacts."""
         return {
             "label": self.label,
             "kernel_type": self.kernel_type,
@@ -118,14 +127,18 @@ class ModelConfig:
             "changepoint_location": self.changepoint_location,
             "changepoint_width": self.changepoint_width,
             "n_freqs": self.n_freqs,
-            **dict(self.extra_params),
         }
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
+    """Optimization and normalization settings for exact GP training."""
+
     training_iter: int = 1000
     patience: int = 15
+    min_delta: float = 1e-3
+    learning_rate: float = 0.1
+    log_interval: int = 20
     normalization_eps: float = 1e-6
     verbose: bool = False
 
@@ -134,6 +147,12 @@ class TrainingConfig:
             raise ValueError("training_iter must be positive.")
         if self.patience <= 0:
             raise ValueError("patience must be positive.")
+        if self.min_delta < 0.0:
+            raise ValueError("min_delta cannot be negative.")
+        if self.learning_rate <= 0.0:
+            raise ValueError("learning_rate must be positive.")
+        if self.log_interval <= 0:
+            raise ValueError("log_interval must be positive.")
         if self.normalization_eps <= 0.0:
             raise ValueError("normalization_eps must be positive.")
 
@@ -141,6 +160,9 @@ class TrainingConfig:
         return {
             "training_iter": self.training_iter,
             "patience": self.patience,
+            "min_delta": self.min_delta,
+            "learning_rate": self.learning_rate,
+            "log_interval": self.log_interval,
             "normalization_eps": self.normalization_eps,
             "verbose": self.verbose,
         }
@@ -219,36 +241,29 @@ class EvaluationConfig:
 
 
 @dataclass(frozen=True)
-class PipelineConfig:
-    simulator: SimulatorConfig
-    model: ModelConfig
-    sampling: SamplingConfig
-    training: TrainingConfig = field(default_factory=TrainingConfig)
-    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
-
-
-@dataclass(frozen=True)
 class ParallelConfig:
-    """Configuration for parallel execution across random seeds."""
-
-    enabled: bool = True
+    enabled: bool = False
     max_workers: int | None = None
     torch_threads_per_worker: int | None = None
     start_method: Literal["spawn", "forkserver"] = "spawn"
 
     def __post_init__(self) -> None:
         if self.max_workers is not None and self.max_workers <= 0:
-            raise ValueError(
-                "max_workers must be positive or None."
-            )
-
+            raise ValueError("max_workers must be positive or None.")
         if (
             self.torch_threads_per_worker is not None
             and self.torch_threads_per_worker <= 0
         ):
-            raise ValueError(
-                "torch_threads_per_worker must be positive or None."
-            )
+            raise ValueError("torch_threads_per_worker must be positive or None.")
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    simulator: SimulatorConfig
+    model: ModelConfig
+    sampling: SamplingConfig
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
 
 
 @dataclass(frozen=True)
@@ -321,21 +336,17 @@ class TrainedModels:
 
 @dataclass
 class RunResult:
-    """Serializable result returned by one seed worker."""
+    """Serializable result returned by one completed seed."""
 
     experiment_name: str
     model_label: str
     seed: int
     pipeline_config: PipelineConfig
-
     metrics: dict[str, Any]
-
     p_gp: np.ndarray
     q_gp: np.ndarray
-
     H_reference: np.ndarray
     H_gp: np.ndarray
-
     dHdq_summary: dict[str, np.ndarray]
 
 
@@ -354,8 +365,6 @@ class AggregateResult:
 
 @dataclass(frozen=True)
 class SeedJob:
-    """Everything needed to execute one seed in a worker process."""
-
     pipeline_config: PipelineConfig
     seed: int
     training_data: dict[str, np.ndarray]

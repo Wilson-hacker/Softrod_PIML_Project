@@ -1,5 +1,13 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+
 import numpy as np
 from scipy.integrate import solve_ivp
+
+from config import SimulatorConfig
+
+StiffnessFunction = Callable[[SimulatorConfig, np.ndarray], np.ndarray]
 
 
 def const_stiffness(z_arr):
@@ -11,73 +19,59 @@ def periodic_stiffness(num_hinges, length, z_arr):
     return 10.0 + 4.0 * np.cos(2 * hinge_freq * z_arr)
 
 
-def periodic_c2_bumps(num_bumps, length, z_arr, base=10.0, amp=4.0, radius=None):
-    """
-    Less-smooth but still C^2 stiffness profile using compactly supported
-    Wendland C^2 basis functions.
-
-    Regularity: C^2, but generally not C^3.
-    Useful for testing Matérn kernels with finite smoothness assumptions.
-
-    k(z) = base + amp * normalized_sum_of_C2_bumps(z)
-    """
-    z_arr = np.asarray(z_arr)
+def periodic_c2_bumps(
+    num_bumps: int,
+    length: float,
+    z_arr: np.ndarray,
+    base: float = 10.0,
+    amplitude: float = 4.0,
+    radius: float | None = None,
+) -> np.ndarray:
+    """Construct deterministic compactly supported Wendland C2 bumps."""
+    z_arr = np.asarray(z_arr, dtype=float)
 
     if radius is None:
         radius = 0.5 * length / num_bumps
+    if radius <= 0.0:
+        raise ValueError("radius must be positive.")
 
     centers = np.linspace(0.1 * length, 0.9 * length, num_bumps)
+    weights = (-1.0) ** np.arange(num_bumps)
 
-    # Alternating bump amplitudes to create spatial heterogeneity.
-    weights = np.array([(-1.0) ** i for i in range(num_bumps)])
+    normalized_distance = np.abs(z_arr[:, None] - centers[None, :]) / radius
+    basis = np.where(
+        normalized_distance < 1.0,
+        (1.0 - normalized_distance) ** 4 * (4.0 * normalized_distance + 1.0),
+        0.0,
+    )
+    profile = basis @ weights
 
-    profile = np.zeros_like(z_arr, dtype=float)
-
-    for center, weight in zip(centers, weights):
-        r = np.abs(z_arr - center) / radius
-
-        # Wendland C^2 function in 1D:
-        # phi(r) = (1-r)^4_+ (4r+1)
-        phi = np.where(
-            r < 1.0,
-            (1.0 - r) ** 4 * (4.0 * r + 1.0),
-            0.0,
-        )
-
-        profile += weight * phi
-
-    # Normalize to roughly [-1, 1] before scaling.
-    max_abs = np.max(np.abs(profile))
+    max_abs = float(np.max(np.abs(profile)))
     if max_abs > 1e-12:
         profile = profile / max_abs
 
-    return base + amp * profile
+    return base + amplitude * profile
 
 
 def c2_multiscale_stiffness(
-    num_bumps,
-    length,
-    z_arr,
-    k_min=5.0,
-    k_max=18.0,
-    seed=42,
-    min_radius_frac=0.035,
-    max_radius_frac=0.12,
-):
-    """
-    Rough but C^2 stiffness profile using compactly supported Wendland C^2 bumps.
+    num_bumps: int,
+    length: float,
+    z_arr: np.ndarray,
+    k_min: float = 5.0,
+    k_max: float = 18.0,
+    seed: int = 42,
+    min_radius_frac: float = 0.035,
+    max_radius_frac: float = 0.12,
+) -> np.ndarray:
+    """Construct a fixed randomized multiscale Wendland-C2 profile."""
+    if num_bumps <= 0:
+        raise ValueError("num_bumps must be positive.")
+    if not 0.0 < min_radius_frac <= max_radius_frac:
+        raise ValueError("Radius fractions must satisfy 0 < min <= max.")
+    if k_min >= k_max:
+        raise ValueError("k_min must be smaller than k_max.")
 
-    Regularity:
-        C^2, but not generally C^3.
-
-    Why this is harder than the previous version:
-        - more bumps,
-        - random centers,
-        - multiple spatial scales,
-        - variation distributed across the full domain,
-        - rescaled to a fixed positive stiffness range [k_min, k_max].
-    """
-    z_arr = np.asarray(z_arr)
+    z_arr = np.asarray(z_arr, dtype=float)
     rng = np.random.default_rng(seed)
 
     centers = rng.uniform(0.0, length, size=num_bumps)
@@ -86,134 +80,78 @@ def c2_multiscale_stiffness(
         max_radius_frac * length,
         size=num_bumps,
     )
-    weights = rng.normal(loc=0.0, scale=1.0, size=num_bumps)
+    weights = rng.normal(0.0, 1.0, size=num_bumps)
 
-    profile = np.zeros_like(z_arr, dtype=float)
+    normalized_distance = np.abs(z_arr[:, None] - centers[None, :]) / radii[None, :]
+    basis = np.where(
+        normalized_distance < 1.0,
+        (1.0 - normalized_distance) ** 4 * (4.0 * normalized_distance + 1.0),
+        0.0,
+    )
+    profile = basis @ weights
 
-    for center, radius, weight in zip(centers, radii, weights):
-        r = np.abs(z_arr - center) / radius
-
-        # Wendland C^2:
-        # phi(r) = (1-r)^4_+ (4r+1)
-        phi = np.where(
-            r < 1.0,
-            (1.0 - r) ** 4 * (4.0 * r + 1.0),
-            0.0,
-        )
-
-        profile += weight * phi
-
-    # Add a mild low-frequency component so the whole domain is affected.
     profile += 0.5 * np.sin(2.0 * np.pi * z_arr / length)
     profile += 0.3 * np.cos(4.0 * np.pi * z_arr / length)
 
-    # Rescale to [k_min, k_max].
-    p_min = np.min(profile)
-    p_max = np.max(profile)
+    profile_min = float(np.min(profile))
+    profile_max = float(np.max(profile))
 
-    if p_max - p_min < 1e-12:
+    if profile_max - profile_min < 1e-12:
         return np.full_like(z_arr, 0.5 * (k_min + k_max))
 
-    profile_01 = (profile - p_min) / (p_max - p_min)
-    stiffness = k_min + (k_max - k_min) * profile_01
-
-    return stiffness
+    profile_01 = (profile - profile_min) / (profile_max - profile_min)
+    return k_min + (k_max - k_min) * profile_01
 
 
 def piecewise_stiffness(
-    num_segments,
-    length,
-    z_arr,
-    values=None,
-    transition_center=None,
-    transition_width=None,
-    smoothness="C2",
-):
-    """
-    Smoothed piecewise stiffness profile with one sharp transition.
-
-    Regularity:
-        smoothness="C1": cubic smoothstep transition
-        smoothness="C2": quintic smootherstep transition
-
-    This is a step-like profile, but the discontinuity is replaced by a finite-width
-    smooth transition. This is safer for finite-difference PDE simulation than a
-    truly discontinuous stiffness jump.
-
-    Args:
-        num_segments:
-            Kept for compatibility with the old function. For the current
-            changepoint-kernel experiments, use num_segments=2.
-        length:
-            Domain length.
-        z_arr:
-            Spatial grid array.
-        values:
-            Two stiffness values [left_value, right_value].
-            If None, defaults to [6.0, 14.0].
-        transition_center:
-            Center of the transition. If None, uses length / 2.
-        transition_width:
-            Width of the smooth transition region. If None, uses 5 grid spacings.
-        smoothness:
-            "C1" or "C2".
-
-    Returns:
-        k(z): array with same shape as z_arr.
-    """
-
+    length: float,
+    z_arr: np.ndarray,
+    values: tuple[float, float] = (5.0, 15.0),
+    transition_center: float | None = None,
+    transition_width: float | None = None,
+    smoothness: str = "C2",
+) -> np.ndarray:
+    """Construct a two-region stiffness profile with a smooth transition."""
     z_arr = np.asarray(z_arr, dtype=float)
-
-    if num_segments != 2:
-        print(
-            "[WARNING] This smoothed piecewise profile currently uses one transition. "
-            "Only the first two stiffness values are used."
-        )
-
-    if values is None:
-        values = np.array([5.0, 15.0], dtype=float)
-    else:
-        values = np.asarray(values, dtype=float)
-        if len(values) < 2:
-            raise ValueError("values must contain at least two stiffness values.")
-
-    k_left = values[0]
-    k_right = values[1]
+    k_left, k_right = values
 
     if transition_center is None:
         transition_center = 0.5 * length
 
     if transition_width is None:
-        # Use about 5 grid spacings by default.
-        # This keeps the step sharp but avoids a true discontinuity.
-        dz = np.median(np.diff(np.sort(z_arr)))
-        transition_width = 2.0 * dz
+        spatial_steps = np.diff(np.sort(z_arr))
+        if spatial_steps.size == 0:
+            raise ValueError("z_arr must contain at least two points.")
+        transition_width = 2.0 * float(np.median(spatial_steps))
 
-    if transition_width <= 0:
+    if transition_width <= 0.0:
         raise ValueError("transition_width must be positive.")
 
     z_start = transition_center - 0.5 * transition_width
-    z_end = transition_center + 0.5 * transition_width
+    normalized_coordinate = np.clip(
+        (z_arr - z_start) / transition_width,
+        0.0,
+        1.0,
+    )
 
-    # Normalized transition coordinate.
-    s = (z_arr - z_start) / (z_end - z_start)
-    s = np.clip(s, 0.0, 1.0)
-
-    if smoothness.upper() == "C1":
-        # Cubic smoothstep: C1 continuous.
-        weight = 3.0 * s**2 - 2.0 * s**3
-
-    elif smoothness.upper() == "C2":
-        # Quintic smootherstep: C2 continuous.
-        weight = 6.0 * s**5 - 15.0 * s**4 + 10.0 * s**3
-
+    smoothness_upper = smoothness.upper()
+    if smoothness_upper == "C1":
+        weight = 3.0 * normalized_coordinate**2 - 2.0 * normalized_coordinate**3
+    elif smoothness_upper == "C2":
+        weight = (
+            6.0 * normalized_coordinate**5
+            - 15.0 * normalized_coordinate**4
+            + 10.0 * normalized_coordinate**3
+        )
     else:
         raise ValueError("smoothness must be either 'C1' or 'C2'.")
 
     return k_left + (k_right - k_left) * weight
 
 
-def sharp_transition_stiffness(length, z_arr, low=6.0, high=14.0, center=None, width=0.1):
+def sharp_transition_stiffness(
+    length, z_arr, low=6.0, high=14.0, center=None, width=0.1
+):
     """
     Smooth but sharp transition between two stiffness levels.
 
@@ -231,43 +169,89 @@ def sharp_transition_stiffness(length, z_arr, low=6.0, high=14.0, center=None, w
     return low * (1.0 - transition) + high * transition
 
 
+def build_stiffness_profile(
+    config: SimulatorConfig,
+    z_arr: np.ndarray,
+) -> np.ndarray:
+    """Construct the configured material stiffness field."""
+    profile = config.stiffness_profile
+
+    if profile == "constant":
+        stiffness = const_stiffness(z_arr)
+    elif profile == "periodic":
+        stiffness = periodic_stiffness(config.num_hinges, config.L, z_arr)
+    elif profile == "periodic bumps":
+        stiffness = periodic_c2_bumps(
+            config.num_hinges,
+            config.L,
+            z_arr,
+        )
+    elif profile == "C2":
+        stiffness = c2_multiscale_stiffness(
+            config.num_hinges,
+            config.L,
+            z_arr,
+            seed=config.profile_seed,
+        )
+    elif profile == "piecewise":
+        if config.num_hinges != 2:
+            raise ValueError("The current piecewise profile requires num_hinges=2.")
+        stiffness = piecewise_stiffness(config.L, z_arr)
+    elif profile == "sharp":
+        stiffness = sharp_transition_stiffness(config.L, z_arr)
+    else:
+        raise ValueError(f"Unknown stiffness profile: {profile!r}.")
+
+    stiffness = np.asarray(stiffness, dtype=float)
+    if stiffness.shape != z_arr.shape:
+        raise ValueError("The stiffness profile must match the spatial grid.")
+    if not np.isfinite(stiffness).all():
+        raise ValueError("The stiffness profile contains nonfinite values.")
+    if np.any(stiffness <= 0.0):
+        raise ValueError("The stiffness profile must remain strictly positive.")
+
+    return stiffness
+
+
 class SoftRodSimulator:
-    def __init__(self, L=10.0, N=100, T=5.0, dt=0.01, num_hinges=4,
-                 stiffness_profile="periodic", profile_seed=42):
-        self.L = L
-        self.N = N
-        self.T = T
-        self.dt = dt
-        self.z = np.linspace(0, L, N)
-        self.dz = self.z[1] - self.z[0]
-        self.damping = 0.05
-        self.profile_seed = profile_seed
+    def __init__(self, config: SimulatorConfig):
+        self.config = config
+        self.L = config.L
+        self.N = config.N
+        self.T = config.T
+        self.dt = config.dt
+        self.damping = config.damping
+        self.profile_seed = config.profile_seed
+        self.stiffness_profile = config.stiffness_profile
+        self.num_hinges = config.num_hinges
 
-        # Geometry: varying stiffness k(z) for "thin hinges"
-        if stiffness_profile == "periodic":
-            self.stiffness = periodic_stiffness(num_hinges, L, self.z)
-        elif stiffness_profile == "periodic bumps":
-            self.stiffness = periodic_c2_bumps(num_hinges, L, self.z)
-        elif stiffness_profile == "constant":
-            self.stiffness = const_stiffness(self.z)
-        elif stiffness_profile == "C2":
-            self.stiffness = c2_multiscale_stiffness(num_hinges, L, self.z, seed=self.profile_seed)
-        elif stiffness_profile == "piecewise":
-            self.stiffness = piecewise_stiffness(num_hinges, L, self.z)
-        elif stiffness_profile == "sharp":
-            self.stiffness = sharp_transition_stiffness(L, self.z)
+        self.z = np.linspace(0.0, self.L, self.N)
+        self.dz = float(self.z[1] - self.z[0])
+        self.stiffness = build_stiffness_profile(config, self.z)
+
+        # This spatial factor is constant throughout all ODE evaluations.
+        self.motor_location = np.exp(-10.0 * (self.z - self.L / 2.0) ** 2)
+
+    def dEdq(self, q: np.ndarray) -> np.ndarray:
+        """Evaluate dH/dq for q with shape (N,) or (N,T)."""
+        q = np.asarray(q, dtype=float)
+
+        if q.ndim == 1:
+            if q.shape[0] != self.N:
+                raise ValueError("A one-dimensional q must have length N.")
+            stiffness = self.stiffness
+        elif q.ndim == 2:
+            if q.shape[0] != self.N:
+                raise ValueError("The first dimension of q must equal N.")
+            stiffness = self.stiffness[:, None]
         else:
-            raise ValueError(f"Unknown stiffness profile: {stiffness_profile}")
+            raise ValueError("q must have shape (N,) or (N,T).")
 
-
-    def dEdq(self, q, z_idx):
-        """Derivative of strain energy w.r.t strain"""
-        k = self.stiffness[z_idx]
-        return k * q + 2.0 * q ** 3
+        return stiffness * q + 2.0 * q**3
 
     def dEdp(self, p):
         """Derivative of kinetic energy w.r.t momentum"""
-        return p
+        return np.asarray(p, dtype=float)
 
     def motor_force(self, t, z):
         """
@@ -276,9 +260,8 @@ class SoftRodSimulator:
         pulsing energy into the system over time.
         """
         # Example: A motor at the middle of the rod that pulses periodically
-        motor_location = np.exp(-10.0 * (z - self.L / 2) ** 2)
-        motor_pulse = np.sin(2 * np.pi * t)
-        return motor_location * motor_pulse
+        motor_pulse = np.sin(2.0 * np.pi * t)
+        return self.motor_location * motor_pulse
 
     def evaluate_ph_dynamics(self, p, q, grad_H_p, grad_H_q, t):
         """
@@ -299,51 +282,48 @@ class SoftRodSimulator:
         dp_dt += self.motor_force(t, self.z)
 
         # Boundary conditions (Fixed ends)
-        dq_dt[0], dq_dt[-1] = 0.0, 0.0
-        dp_dt[0], dp_dt[-1] = 0.0, 0.0
+        dq_dt[[0, -1]] = 0.0
+        dp_dt[[0, -1]] = 0.0
 
         return np.concatenate([dp_dt, dq_dt])
 
     def pde_rhs(self, t, state):
         """Standard RHS using true analytical energy gradients."""
-        p = state[:self.N]
-        q = state[self.N:]
+        p = state[: self.N]
+        q = state[self.N :]
 
-        grad_H_p = self.dEdp(p)
-        grad_H_q = np.array([self.dEdq(q[i], i) for i in range(self.N)])
-
-        # Delegate to the structural physics operator
-        return self.evaluate_ph_dynamics(p, q, grad_H_p, grad_H_q, t)
+        return self.evaluate_ph_dynamics(
+            p, q, grad_H_p=self.dEdp(p), grad_H_q=self.dEdq(q), t=t
+        )
 
     def generate_dataset(self, get_init_q_config):
         q0 = get_init_q_config(self.z, self.L)
-        # q0 = -4.0 * (self.z - self.L / 2) * np.exp(-(self.z - self.L / 2) ** 2)
         p0 = np.zeros(self.N)
         state0 = np.concatenate([p0, q0])
 
         t_eval = np.arange(0, self.T, self.dt)
-        sol = solve_ivp(self.pde_rhs, [0, self.T], state0, t_eval=t_eval, method='RK45')
+        sol = solve_ivp(self.pde_rhs, [0, self.T], state0, t_eval=t_eval, method="RK45")
 
-        p_data = sol.y[:self.N, :]
-        q_data = sol.y[self.N:, :]
+        if not sol.success:
+            raise RuntimeError(f"Reference simulation failed: {sol.message}")
+        if sol.y.shape[1] != t_eval.size:
+            raise RuntimeError(
+                "Reference simulation returned fewer output times than requested."
+            )
 
-        grad_H_p = np.zeros_like(p_data)
-        grad_H_q = np.zeros_like(q_data)
+        p_data = sol.y[: self.N, :]
+        q_data = sol.y[self.N :, :]
 
-        # Bypass the unstable cumulative_trapezoid extraction.
-        # Instead, we directly query the exact analytical energy gradients
-        # to serve as pristine ground-truth targets for the GP.
-        for i in range(len(sol.t)):
-            p = sol.y[:self.N, i]
-            q = sol.y[self.N:, i]
-
-            grad_H_p[:, i] = self.dEdp(p)
-            grad_H_q[:, i] = np.array([self.dEdq(q[j], j) for j in range(self.N)])
+        grad_H_p = self.dEdp(p_data)
+        grad_H_q = self.dEdq(q_data)
 
         return {
-            'p': p_data, 'q': q_data,
-            'dH_dp': grad_H_p, 'dH_dq': grad_H_q,
-            't': sol.t, 'z': self.z
+            "p": p_data,
+            "q": q_data,
+            "dH_dp": grad_H_p,
+            "dH_dq": grad_H_q,
+            "t": sol.t,
+            "z": self.z,
         }
 
     def energy_density(self, p, q):
@@ -357,10 +337,10 @@ class SoftRodSimulator:
         k = self.stiffness
 
         if p.ndim == 1:
-            return 0.5 * p ** 2 + 0.5 * k * q ** 2 + 0.5 * q ** 4
+            return 0.5 * p**2 + 0.5 * k * q**2 + 0.5 * q**4
 
         if p.ndim == 2:
-            return 0.5 * p ** 2 + 0.5 * k[:, None] * q ** 2 + 0.5 * q ** 4
+            return 0.5 * p**2 + 0.5 * k[:, None] * q**2 + 0.5 * q**4
 
         raise ValueError(f"Expected p, q to have ndim 1 or 2, got {p.ndim}.")
 

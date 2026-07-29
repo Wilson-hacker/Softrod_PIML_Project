@@ -76,14 +76,10 @@ def stratified_z_indices(
     for pool, count in zip(pools, requested):
         actual_count = min(count, pool.size)
         if actual_count:
-            selected_parts.append(
-                rng.choice(pool, size=actual_count, replace=False)
-            )
+            selected_parts.append(rng.choice(pool, size=actual_count, replace=False))
 
     train_indices = (
-        np.concatenate(selected_parts)
-        if selected_parts
-        else np.empty(0, dtype=int)
+        np.concatenate(selected_parts) if selected_parts else np.empty(0, dtype=int)
     )
 
     if train_indices.size < num_train:
@@ -142,9 +138,7 @@ def make_flat_dataset_from_sim_data(
     n_z, n_t = q.shape
     z_grid = np.broadcast_to(z[:, None], (n_z, n_t))
 
-    X_all = np.column_stack(
-        (p.reshape(-1), q.reshape(-1), z_grid.reshape(-1))
-    )
+    X_all = np.column_stack((p.reshape(-1), q.reshape(-1), z_grid.reshape(-1)))
     y_p_all = np.asarray(data["dH_dp"]).reshape(-1)
     y_q_all = np.asarray(data["dH_dq"]).reshape(-1)
 

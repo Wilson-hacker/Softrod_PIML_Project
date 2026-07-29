@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from scipy.integrate import solve_ivp, cumulative_trapezoid
+from scipy.integrate import cumulative_trapezoid, solve_ivp
 
 from config import InitialCondition, NormalizationStats, TrainedModels
 
@@ -113,9 +113,7 @@ def reconstruct_displacement_from_strain(
     q = np.asarray(q, dtype=float)
 
     if q.ndim != 2:
-        raise ValueError(
-            "q must have shape (N_z, N_t)."
-        )
+        raise ValueError("q must have shape (N_z, N_t).")
 
     return cumulative_trapezoid(
         q,
