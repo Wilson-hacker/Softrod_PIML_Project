@@ -11,7 +11,6 @@ from config import (
 from plotting import (
     load_experiment_artifact,
     plot_multi_profile_rollout_grid_from_artifact,
-    plot_profile_overlay_from_artifact,
 )
 
 
@@ -22,17 +21,10 @@ def plot_main_experiment(
 
     plot_multi_profile_rollout_grid_from_artifact(
         artifact,
+        experiment_filter=["periodic", "C2", "piecewise"],
         time_slices=(0, 50, 100),
         save_path="./plots/rollout_consistent_scaling.pdf",
     )
-
-    for experiment_name in artifact["experiment_order"]:
-        plot_profile_overlay_from_artifact(
-            artifact,
-            experiment_name=experiment_name,
-            time_slices=(0, 50, 100),
-            save_path=f"./plots/{experiment_name}_rollout_overlay.pdf",
-        )
 
 
 def print_aggregate_table(

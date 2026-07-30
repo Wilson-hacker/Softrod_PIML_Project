@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from config import ARTIFACT_SCHEMA_VERSION
-from rollout import reconstruct_displacement_from_strain
 
 
 def load_experiment_artifact(path: str | Path) -> dict[str, Any]:
@@ -37,145 +36,30 @@ def _finalize_figure(figure: plt.Figure, save_path: str | Path | None) -> None:
     plt.close(figure)
 
 
-def plot_rollout_time_slices_from_artifact(
-    artifact: Mapping[str, Any],
-    experiment_name: str,
-    model_label: str,
-    time_slices: Sequence[int] = (0, 50, 100),
-    save_path: str | Path | None = None,
-    title: str | None = None,
-) -> None:
-    profile = artifact["experiments"][experiment_name]
-    model = profile["models"][model_label]
-    z = np.asarray(profile["z"])
-    dt = float(profile["dt"])
-    u_reference = np.asarray(profile["u_reference"])
-    u_prediction = reconstruct_displacement_from_strain(
-        np.asarray(model["q_gp_mean"]),
-        float(profile["dz"]),
-    )
-
-    figure, axes = plt.subplots(
-        1,
-        len(time_slices),
-        figsize=(5.0 * len(time_slices), 4.6),
-        sharey=True,
-        squeeze=False,
-    )
-    axes = axes[0]
-
-    if title is None:
-        title = f"{profile['row_label']}: {model_label}"
-    if title:
-        figure.suptitle(title)
-
-    for axis_index, step in enumerate(time_slices):
-        if not 0 <= step < u_reference.shape[1]:
-            raise IndexError(f"Time step {step} is out of bounds.")
-
-        axis = axes[axis_index]
-        axis.plot(z, u_reference[:, step], label="Numerical solution")
-        axis.plot(
-            z,
-            u_prediction[:, step],
-            linestyle="--",
-            label=model_label,
-        )
-        axis.set_title(f"Step {step} ($t={step * dt:.2f}$)")
-        axis.set_xlabel(r"$z$")
-        axis.grid(True, linestyle=":", alpha=0.5)
-        if axis_index == 0:
-            axis.set_ylabel(r"$u(z,t)$")
-        axis.legend()
-
-    figure.tight_layout()
-    _finalize_figure(figure, save_path)
-
-
-def plot_profile_overlay_from_artifact(
-    artifact: Mapping[str, Any],
-    experiment_name: str,
-    time_slices: Sequence[int] = (0, 50, 100),
-    save_path: str | Path | None = None,
-    title: str | None = None,
-) -> None:
-    profile = artifact["experiments"][experiment_name]
-    z = np.asarray(profile["z"])
-    dt = float(profile["dt"])
-    dz = float(profile["dz"])
-    u_reference = np.asarray(profile["u_reference"])
-
-    figure, axes = plt.subplots(
-        1,
-        len(time_slices),
-        figsize=(5.0 * len(time_slices), 4.6),
-        sharey=True,
-        squeeze=False,
-    )
-    axes = axes[0]
-
-    if title is None:
-        title = f"Average rollout: {profile['row_label']}"
-    if title:
-        figure.suptitle(title)
-
-    handles: list[Any] = []
-    labels: list[str] = []
-
-    for axis_index, step in enumerate(time_slices):
-        if not 0 <= step < u_reference.shape[1]:
-            raise IndexError(f"Time step {step} is out of bounds.")
-
-        axis = axes[axis_index]
-        (reference_line,) = axis.plot(
-            z,
-            u_reference[:, step],
-            label="Numerical solution",
-        )
-        if axis_index == 0:
-            handles.append(reference_line)
-            labels.append("Numerical solution")
-
-        for model_label, model in profile["models"].items():
-            u_prediction = reconstruct_displacement_from_strain(
-                np.asarray(model["q_gp_mean"]),
-                dz,
-            )
-            (line,) = axis.plot(
-                z,
-                u_prediction[:, step],
-                linestyle="--",
-                label=model_label,
-            )
-            if axis_index == 0:
-                handles.append(line)
-                labels.append(model_label)
-
-        axis.set_title(f"Step {step} ($t={step * dt:.2f}$)")
-        axis.set_xlabel(r"$z$")
-        axis.grid(True, linestyle=":", alpha=0.5)
-        if axis_index == 0:
-            axis.set_ylabel(r"$u(z,t)$")
-
-    figure.legend(
-        handles,
-        labels,
-        loc="lower center",
-        ncol=len(labels),
-        frameon=True,
-    )
-    figure.tight_layout(rect=(0.0, 0.10, 1.0, 0.95))
-    _finalize_figure(figure, save_path)
-
-
 def plot_multi_profile_rollout_grid_from_artifact(
     artifact: Mapping[str, Any],
+    experiment_filter: Sequence[str] | None = None,
     time_slices: Sequence[int] = (0, 50, 100),
     save_path: str | Path | None = None,
     figsize: tuple[float, float] = (12.0, 8.0),
 ) -> None:
-    experiment_order = artifact["experiment_order"]
     experiments = artifact["experiments"]
+
+    if experiment_filter is None:
+        experiment_order = artifact["experiment_order"]
+    else:
+        missing = set(experiment_filter) - set(experiments.keys())
+
+        if missing:
+            raise KeyError(f"Unknown experiments requested: {sorted(missing)}")
+
+        experiment_order = [
+            name for name in artifact["experiment_order"] if name in experiment_filter
+        ]
+
+    if not experiment_order:
+        raise ValueError("No experiments selected for plotting.")
+
     figure, axes = plt.subplots(
         len(experiment_order),
         len(time_slices),
@@ -185,20 +69,27 @@ def plot_multi_profile_rollout_grid_from_artifact(
         squeeze=False,
     )
 
-    legend_handles: list[Any] | None = None
-    legend_labels: list[str] | None = None
+    legend_handles = None
+    legend_labels = None
 
     for row, experiment_name in enumerate(experiment_order):
         profile = experiments[experiment_name]
+
         z = np.asarray(profile["z"])
         dt = float(profile["dt"])
         dz = float(profile["dz"])
+
         u_reference = np.asarray(profile["u_reference"])
+
+        model_displacements = {}
+
+        for model_label, model in profile["models"].items():
+            model_displacements[model_label] = np.asarray(model["u_gp_mean"])
 
         for column, step in enumerate(time_slices):
             if not 0 <= step < u_reference.shape[1]:
                 raise IndexError(
-                    f"Time step {step} is invalid for experiment {experiment_name!r}."
+                    f"Invalid time index {step} for experiment {experiment_name!r}."
                 )
 
             axis = axes[row, column]
@@ -207,19 +98,16 @@ def plot_multi_profile_rollout_grid_from_artifact(
                 u_reference[:, step],
                 label="Numerical solution",
             )
-            model_lines = []
 
-            for model_label, model in profile["models"].items():
-                u_prediction = reconstruct_displacement_from_strain(
-                    np.asarray(model["q_gp_mean"]),
-                    dz,
-                )
+            model_lines = []
+            for model_label, u_prediction in model_displacements.items():
                 (line,) = axis.plot(
                     z,
                     u_prediction[:, step],
                     linestyle="--",
                     label=model_label,
                 )
+
                 model_lines.append(line)
 
             if row == 0:
@@ -228,6 +116,7 @@ def plot_multi_profile_rollout_grid_from_artifact(
                 axis.set_xlabel(r"$z$")
             if column == 0:
                 axis.set_ylabel(r"$u(z,t)$")
+
                 axis.annotate(
                     profile["row_label"],
                     xy=(-0.22, 0.5),
@@ -242,15 +131,11 @@ def plot_multi_profile_rollout_grid_from_artifact(
 
             if row == 0 and column == 0:
                 legend_handles = [reference_line, *model_lines]
-                legend_labels = ["Numerical solution", *profile["models"].keys()]
+                legend_labels = ["Numerical solution", *model_displacements.keys()]
 
-    if legend_handles is not None and legend_labels is not None:
+    if legend_handles and legend_labels:
         figure.legend(
-            legend_handles,
-            legend_labels,
-            loc="lower center",
-            ncol=len(legend_labels),
-            frameon=True,
+            legend_handles, legend_labels, loc="lower center", ncol=len(legend_labels), frameon=True
         )
 
     figure.subplots_adjust(
@@ -261,6 +146,7 @@ def plot_multi_profile_rollout_grid_from_artifact(
         wspace=0.10,
         hspace=0.16,
     )
+
     _finalize_figure(figure, save_path)
 
 
@@ -293,6 +179,66 @@ def plot_effort_force_curves_from_artifact(
         title = f"{profile['row_label']}: {model_label}"
     if title:
         figure.suptitle(title)
+
+    figure.tight_layout()
+    _finalize_figure(figure, save_path)
+
+
+def plot_force_field_error_heatmap_from_artifact(
+    artifact: Mapping[str, Any],
+    experiment_name: str,
+    model_label: str,
+    log_scale: bool = False,
+    edge: int = 5,
+    save_path: str | Path | None = None,
+) -> None:
+
+    profile = artifact["experiments"][experiment_name]
+    model = profile["models"][model_label]
+    force_error = np.asarray(model["dHdq_force_error"])
+
+    if force_error.ndim == 1:
+        N_z, N_t = profile["grid_shape"]
+
+        force_error = force_error.reshape(N_z, N_t)
+
+    force_error_abs = np.abs(force_error)
+    plot_error = force_error_abs.copy()
+
+    plot_error[:edge, :] = np.nan
+    plot_error[-edge:, :] = np.nan
+
+    if log_scale:
+        plot_error = np.log10(plot_error + 1e-12)
+
+        cbar_label = (
+            r"$\log_{10}"
+            r"(|\Delta \partial_z(\partial_q H)|"
+            r"+10^{-12})$"
+        )
+
+    else:
+        cbar_label = r"$|\Delta \partial_z(\partial_q H)|$"
+
+    z = np.asarray(profile["z"])
+    dt = float(profile["dt"])
+    N_t = force_error.shape[1]
+    t = np.arange(N_t) * dt
+
+    figure, axis = plt.subplots(figsize=(9, 4.8))
+    image = axis.imshow(
+        plot_error,
+        origin="lower",
+        aspect="auto",
+        extent=(t[0], t[-1], z[0], z[-1]),
+    )
+
+    figure.colorbar(image, ax=axis, label=cbar_label)
+
+    axis.set_xlabel("t")
+    axis.set_ylabel("z")
+
+    axis.set_title(f"{experiment_name}: {model_label}")
 
     figure.tight_layout()
     _finalize_figure(figure, save_path)

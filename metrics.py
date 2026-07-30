@@ -14,7 +14,7 @@ from config import (
     TrainedModels,
 )
 from rollout import (
-    model_mean_physical,
+    PhysicalMeanPredictor,
     reconstruct_displacement_from_strain,
     spatial_derivative_centered,
     tensor_to_numpy,
@@ -135,23 +135,37 @@ def compute_curl_integrability_error(
     else:
         X_eval = X_raw
 
+    reference_input = torch.as_tensor(
+        X_eval[: min(batch_size, X_eval.shape[0])],
+        dtype=torch.float64,
+    )
+    dEdp_predictor = PhysicalMeanPredictor(
+        model=dEdp_model,
+        reference_input=reference_input,
+    ).eval()
+    dEdq_predictor = PhysicalMeanPredictor(
+        model=dEdq_model,
+        reference_input=reference_input,
+    ).eval()
+
     curl_batches: list[np.ndarray] = []
 
-    for start in range(0, X_eval.shape[0], batch_size):
-        X_batch = torch.as_tensor(
-            X_eval[start : start + batch_size],
-            dtype=torch.float64,
-        )
+    with torch.enable_grad():
+        for start in range(0, X_eval.shape[0], batch_size):
+            X_batch = torch.as_tensor(
+                X_eval[start : start + batch_size],
+                dtype=torch.float64,
+            )
 
-        X_p = X_batch.clone().detach().requires_grad_(True)
-        mean_p = model_mean_physical(dEdp_model, X_p)
-        gradient_p = torch.autograd.grad(mean_p.sum(), X_p)[0]
+            X_p = X_batch.clone().detach().requires_grad_(True)
+            mean_p = dEdp_predictor(X_p)
+            gradient_p = torch.autograd.grad(mean_p.sum(), X_p)[0]
 
-        X_q = X_batch.clone().detach().requires_grad_(True)
-        mean_q = model_mean_physical(dEdq_model, X_q)
-        gradient_q = torch.autograd.grad(mean_q.sum(), X_q)[0]
+            X_q = X_batch.clone().detach().requires_grad_(True)
+            mean_q = dEdq_predictor(X_q)
+            gradient_q = torch.autograd.grad(mean_q.sum(), X_q)[0]
 
-        curl_batches.append(tensor_to_numpy(gradient_p[:, 1] - gradient_q[:, 0]))
+            curl_batches.append(tensor_to_numpy(gradient_p[:, 1] - gradient_q[:, 0]))
 
     curl = np.concatenate(curl_batches)
     return {

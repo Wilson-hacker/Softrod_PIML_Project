@@ -268,6 +268,7 @@ def run_pipeline(
         simulator=simulation.simulator,
         models=trained_models,
         initial_condition=rollout_initial_condition,
+        compile_gp_predictors=pipeline_config.evaluation.compile_gp_predictors,
     )
 
     if verbose:
@@ -519,6 +520,29 @@ def build_artifact_profile(
     evaluation_data = simulation.evaluation_data
 
     q_reference = np.asarray(evaluation_data["q"])
+    if q_reference.ndim != 2:
+        raise ValueError("The reference strain must have shape (N_z, N_t).")
+
+    grid_shape: tuple[int, int] = (int(q_reference.shape[0]), int(q_reference.shape[1]))
+    u_reference = reconstruct_displacement_from_strain(q_reference, simulator.dz)
+
+    artifact_models: dict[str, dict[str, Any]] = {}
+    for label, result in model_results.items():
+        model_artifact = aggregate_to_artifact_model(result, evaluation_config)
+
+        q_gp_mean = np.asarray(model_artifact["q_gp_mean"])
+
+        if q_gp_mean.shape != grid_shape:
+            raise ValueError(
+                f"Model {label!r} has q_gp_mean shape "
+                f"{q_gp_mean.shape}, but the reference "
+                f"grid shape is {grid_shape}."
+            )
+
+        model_artifact["u_gp_mean"] = reconstruct_displacement_from_strain(
+            q_gp_mean, simulator.dz
+        )
+        artifact_models[label] = model_artifact
 
     return {
         "name": experiment.name,
@@ -531,26 +555,13 @@ def build_artifact_profile(
         "dz": float(simulator.dz),
         "dt": float(simulator.dt),
         "t": np.asarray(
-            evaluation_data.get(
-                "t",
-                np.arange(q_reference.shape[1]) * simulator.dt,
-            )
+            evaluation_data.get("t", np.arange(q_reference.shape[1]) * simulator.dt)
         ),
+        "grid_shape": grid_shape,
         "p_reference": np.asarray(evaluation_data["p"]),
         "q_reference": q_reference,
-        "u_reference": (
-            reconstruct_displacement_from_strain(
-                q_reference,
-                simulator.dz,
-            )
-        ),
-        "models": {
-            label: aggregate_to_artifact_model(
-                result,
-                evaluation_config,
-            )
-            for label, result in model_results.items()
-        },
+        "u_reference": u_reference,
+        "models": artifact_models,
     }
 
 
@@ -748,4 +759,6 @@ def compute_main_experiment(
 
 
 if __name__ == "__main__":
-    compute_main_experiment(save_results_path="./data/paper_experiment_consistent_scaling.pkl")
+    compute_main_experiment(
+        save_results_path="./data/paper_experiment_consistent_scaling2.pkl"
+    )
