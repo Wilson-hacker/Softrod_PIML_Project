@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping, TypeAlias
 
 import numpy as np
 import torch
@@ -9,6 +10,14 @@ import torch
 ARTIFACT_SCHEMA_VERSION = 2
 
 SamplingMethod = Literal["random", "stratified"]
+ODESolverMethod: TypeAlias = Literal[
+    "RK23",
+    "RK45",
+    "DOP853",
+    "Radau",
+    "BDF",
+    "LSODA",
+]
 KernelType = Literal["baseline", "P_only", "SD", "warped"]
 StrainKernelType = Literal["rbf", "linear"]
 SpatialKernelType = Literal[
@@ -30,6 +39,38 @@ InitialCondition = Callable[[np.ndarray, float], np.ndarray]
 
 
 @dataclass(frozen=True)
+class ODESolverConfig:
+    """
+    Numerical settings shared by reference simulation and GP rollout.
+    """
+
+    method: ODESolverMethod = "RK45"
+    rtol: float = 1e-3
+    atol: float = 1e-6
+    max_step: float | None = None
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.rtol) or self.rtol <= 0.0:
+            raise ValueError("rtol must be finite and positive.")
+
+        if not math.isfinite(self.atol) or self.atol <= 0.0:
+            raise ValueError("atol must be finite and positive.")
+
+        if self.max_step is not None and (
+            not math.isfinite(self.max_step) or self.max_step <= 0.0
+        ):
+            raise ValueError("max_step must be finite and positive, or None.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "method": self.method,
+            "rtol": self.rtol,
+            "atol": self.atol,
+            "max_step": self.max_step,
+        }
+
+
+@dataclass(frozen=True)
 class SimulatorConfig:
     """Configuration of the reference physical simulator."""
 
@@ -41,6 +82,8 @@ class SimulatorConfig:
     num_hinges: int = 4
     damping: float = 0.05
     profile_seed: int = 42
+
+    ode_solver: ODESolverConfig = field(default_factory=ODESolverConfig)
 
     def __post_init__(self) -> None:
         if self.L <= 0.0:
@@ -60,6 +103,8 @@ class SimulatorConfig:
 
     def cache_key(self) -> tuple[Any, ...]:
         """Return a hashable identity for deterministic simulation caching."""
+
+        solver = self.ode_solver
         return (
             self.L,
             self.N,
@@ -69,6 +114,10 @@ class SimulatorConfig:
             self.num_hinges,
             self.damping,
             self.profile_seed,
+            solver.method,
+            solver.rtol,
+            solver.atol,
+            solver.max_step,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -82,6 +131,7 @@ class SimulatorConfig:
             "num_hinges": self.num_hinges,
             "damping": self.damping,
             "profile_seed": self.profile_seed,
+            "ode_solver": self.ode_solver.to_dict(),
         }
 
 
@@ -220,7 +270,6 @@ class EvaluationConfig:
     curl_batch_size: int = 256
     force_edge: int = 5
     include_likelihood_noise: bool = True
-    rollout_method: str = "RK45"
 
     def __post_init__(self) -> None:
         if self.curl_max_points <= 0:
@@ -236,7 +285,6 @@ class EvaluationConfig:
             "curl_batch_size": self.curl_batch_size,
             "force_edge": self.force_edge,
             "include_likelihood_noise": self.include_likelihood_noise,
-            "rollout_method": self.rollout_method,
         }
 
 

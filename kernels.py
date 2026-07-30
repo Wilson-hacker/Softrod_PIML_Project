@@ -167,6 +167,9 @@ class ChangepointSpatialKernel(gpytorch.kernels.Kernel):
     Useful for piecewise stiffness or sharp material transitions.
     """
 
+    raw_location: torch.nn.Parameter
+    raw_width: torch.nn.Parameter
+
     def __init__(
         self,
         left_kernel=None,
@@ -191,21 +194,13 @@ class ChangepointSpatialKernel(gpytorch.kernels.Kernel):
         )
 
         location = torch.tensor(float(init_location))
-        raw_width = torch.log(torch.expm1(torch.tensor(float(init_width))))
+        unconstrained_width = torch.log(torch.expm1(torch.tensor(float(init_width))))
 
-        self.register_parameter(
-            name="raw_location",
-            parameter=torch.nn.Parameter(location),
-        )
-        self.register_parameter(
-            name="raw_width",
-            parameter=torch.nn.Parameter(raw_width),
-        )
+        self.raw_location = torch.nn.Parameter(location)
+        self.raw_width = torch.nn.Parameter(unconstrained_width)
 
-        if not learn_location:
-            self.raw_location.requires_grad_(False)
-        if not learn_width:
-            self.raw_width.requires_grad_(False)
+        self.raw_location.requires_grad_(learn_location)
+        self.raw_width.requires_grad_(learn_width)
 
     @property
     def location(self):

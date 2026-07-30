@@ -44,7 +44,6 @@ def simulate_gp_phs(
     simulator: Any,
     models: TrainedModels,
     initial_condition: InitialCondition,
-    method: str = "RK45",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Integrate the learned GP-PHS dynamics from the supplied initial state."""
     q0 = np.asarray(initial_condition(simulator.z, simulator.L), dtype=float)
@@ -69,12 +68,16 @@ def simulate_gp_phs(
         return simulator.evaluate_ph_dynamics(p, q, grad_H_p, grad_H_q, t)
 
     t_eval = np.arange(0.0, simulator.T, simulator.dt)
+    solver_config = simulator.config.ode_solver
     solution = solve_ivp(
         gp_pde_rhs,
         (0.0, simulator.T),
         state0,
         t_eval=t_eval,
-        method=method,
+        method=solver_config.method,
+        rtol=solver_config.rtol,
+        atol=solver_config.atol,
+        max_step=(np.inf if solver_config.max_step is None else solver_config.max_step),
     )
 
     if not solution.success:

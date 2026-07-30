@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import math
+from typing import cast
 
 import gpytorch
 import torch
@@ -25,7 +26,7 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
         self.covar_module = build_kernel(model_config)
 
     def forward(self, x: torch.Tensor):
-        mean = self.mean_module(x)
+        mean = cast(torch.Tensor, self.mean_module(x))
         covariance = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean, covariance)
 
@@ -90,9 +91,7 @@ def train_gp_model(
         loss = -marginal_log_likelihood(output, train_y)
 
         if not torch.isfinite(loss):
-            raise FloatingPointError(
-                f"Nonfinite GP loss at iteration {iteration + 1}."
-            )
+            raise FloatingPointError(f"Nonfinite GP loss at iteration {iteration + 1}.")
 
         loss.backward()
         optimizer.step()

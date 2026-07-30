@@ -187,7 +187,15 @@ def prepare_training_dataset(
     y_p_train_norm = (y_p_train_raw - y_p_mean) / (y_p_std + normalization_eps)
     y_q_train_norm = (y_q_train_raw - y_q_mean) / (y_q_std + normalization_eps)
 
-    grid_shape = tuple(int(value) for value in np.asarray(reference_data["q"]).shape)
+    q_reference = np.asarray(reference_data["q"])
+
+    if q_reference.ndim != 2:
+        raise ValueError(
+            "reference_data['q'] must have shape (N_z, N_t), "
+            f"but received shape {q_reference.shape}."
+        )
+
+    grid_shape: tuple[int, int] = q_reference.shape
 
     return DatasetBundle(
         reference_data=reference_data,

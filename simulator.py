@@ -6,6 +6,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 
 from config import SimulatorConfig
+from rollout import spatial_derivative_centered
 
 StiffnessFunction = Callable[[SimulatorConfig, np.ndarray], np.ndarray]
 
@@ -268,12 +269,14 @@ class SoftRodSimulator:
         The core Port-Hamiltonian structural physics mapping:
         dx/dt = (J - R) * dH/dx + G * u(t)
         """
-        dp_dt = np.zeros_like(p)
-        dq_dt = np.zeros_like(q)
-
-        # J matrix (Interconnection via spatial derivative)
-        dq_dt[1:-1] = (grad_H_p[2:] - grad_H_p[:-2]) / (2 * self.dz)
-        dp_dt[1:-1] = (grad_H_q[2:] - grad_H_q[:-2]) / (2 * self.dz)
+        # dp_dt = np.zeros_like(p)
+        # dq_dt = np.zeros_like(q)
+        #
+        # # J matrix (Interconnection via spatial derivative)
+        # dq_dt[1:-1] = (grad_H_p[2:] - grad_H_p[:-2]) / (2 * self.dz)
+        # dp_dt[1:-1] = (grad_H_q[2:] - grad_H_q[:-2]) / (2 * self.dz)
+        dq_dt = spatial_derivative_centered(grad_H_p, self.dz, boundary_value=0.0)
+        dp_dt = spatial_derivative_centered(grad_H_q, self.dz, boundary_value=0.0)
 
         # R matrix (Dissipation)
         dp_dt -= self.damping * grad_H_p
@@ -302,7 +305,20 @@ class SoftRodSimulator:
         state0 = np.concatenate([p0, q0])
 
         t_eval = np.arange(0, self.T, self.dt)
-        sol = solve_ivp(self.pde_rhs, [0, self.T], state0, t_eval=t_eval, method="RK45")
+        solver_config = self.config.ode_solver
+
+        sol = solve_ivp(
+            self.pde_rhs,
+            [0, self.T],
+            state0,
+            t_eval=t_eval,
+            method=solver_config.method,
+            rtol=solver_config.rtol,
+            atol=solver_config.atol,
+            max_step=np.inf
+            if solver_config.max_step is None
+            else solver_config.max_step,
+        )
 
         if not sol.success:
             raise RuntimeError(f"Reference simulation failed: {sol.message}")

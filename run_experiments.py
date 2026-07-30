@@ -268,7 +268,6 @@ def run_pipeline(
         simulator=simulation.simulator,
         models=trained_models,
         initial_condition=rollout_initial_condition,
-        method=pipeline_config.evaluation.rollout_method,
     )
 
     if verbose:
