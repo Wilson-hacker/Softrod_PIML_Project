@@ -77,8 +77,8 @@ def compute_rollout_error_metrics(
     p_ref, q_ref, p_gp, q_gp = aligned_trajectories(data, p_gp, q_gp)
     state_ref = np.concatenate((p_ref, q_ref), axis=0)
     state_gp = np.concatenate((p_gp, q_gp), axis=0)
-    u_ref = reconstruct_displacement_from_strain(q_ref, simulator)
-    u_gp = reconstruct_displacement_from_strain(q_gp, simulator)
+    u_ref = reconstruct_displacement_from_strain(q_ref, simulator.dz)
+    u_gp = reconstruct_displacement_from_strain(q_gp, simulator.dz)
 
     return {
         "p_rel_l2": relative_l2(p_gp, p_ref),

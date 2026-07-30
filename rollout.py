@@ -101,14 +101,14 @@ def spatial_derivative_centered(
 
 def reconstruct_displacement_from_strain(
     q: np.ndarray,
-    dz_or_simulator: float | Any,
+    dz: float,
 ) -> np.ndarray:
     """Reconstruct u with u(0,t)=0 using the project's existing scheme."""
-    dz = (
-        float(dz_or_simulator)
-        if np.isscalar(dz_or_simulator)
-        else float(dz_or_simulator.dz)
-    )
+    # dz = (
+    #     float(dz_or_simulator)
+    #     if np.isscalar(dz_or_simulator)
+    #     else float(dz_or_simulator.dz)
+    # )
 
     q = np.asarray(q, dtype=float)
 
@@ -119,6 +119,6 @@ def reconstruct_displacement_from_strain(
         q,
         dx=dz,
         axis=0,
-        initial=0.0,
+        initial=0,
     )
     # return np.cumsum(q, axis=0) * dz

@@ -52,8 +52,8 @@ def stratified_z_indices(
     if num_train <= 0:
         raise ValueError("The requested training fraction selects no samples.")
 
-    n_left = int(round(num_train * weights[0]))
-    n_middle = int(round(num_train * weights[1]))
+    n_left = round(num_train * weights[0])
+    n_middle = round(num_train * weights[1])
     n_right = num_train - n_left - n_middle
 
     if include_domain_boundaries:

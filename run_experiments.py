@@ -414,7 +414,7 @@ def run_model_over_seeds(
             for job in jobs
         }
 
-        current_seed: int | str = "unknown"
+        # current_seed: int | str = "unknown"
 
         try:
             completed_futures = as_completed(future_to_seed)
@@ -542,7 +542,7 @@ def build_artifact_profile(
         "u_reference": (
             reconstruct_displacement_from_strain(
                 q_reference,
-                simulator,
+                simulator.dz,
             )
         ),
         "models": {
