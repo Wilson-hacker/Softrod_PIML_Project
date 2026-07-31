@@ -129,6 +129,9 @@ def compute_curl_integrability_error(
     dEdq_model.eval()
     rng = np.random.default_rng(seed)
 
+    model_device = dEdp_model.X_mean.device
+    model_dtype = dEdp_model.X_mean.dtype
+
     if X_raw.shape[0] > max_points:
         indices = rng.choice(X_raw.shape[0], size=max_points, replace=False)
         X_eval = X_raw[indices]
@@ -137,15 +140,14 @@ def compute_curl_integrability_error(
 
     reference_input = torch.as_tensor(
         X_eval[: min(batch_size, X_eval.shape[0])],
-        dtype=torch.float64,
+        device=model_device,
+        dtype=model_dtype,
     )
     dEdp_predictor = PhysicalMeanPredictor(
-        model=dEdp_model,
-        reference_input=reference_input,
+        model=dEdp_model, reference_input=reference_input
     ).eval()
     dEdq_predictor = PhysicalMeanPredictor(
-        model=dEdq_model,
-        reference_input=reference_input,
+        model=dEdq_model, reference_input=reference_input
     ).eval()
 
     curl_batches: list[np.ndarray] = []
@@ -154,7 +156,8 @@ def compute_curl_integrability_error(
         for start in range(0, X_eval.shape[0], batch_size):
             X_batch = torch.as_tensor(
                 X_eval[start : start + batch_size],
-                dtype=torch.float64,
+                device=model_device,
+                dtype=model_dtype,
             )
 
             X_p = X_batch.clone().detach().requires_grad_(True)
@@ -184,30 +187,41 @@ def gp_predict_with_uncertainty(
 ) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
     likelihood.eval()
+    model_device = model.X_mean.device
+    model_dtype = model.X_mean.dtype
+
+    reference_input = torch.as_tensor(X_raw[:1], device=model_device, dtype=model_dtype)
+    predictor = PhysicalMeanPredictor(
+        model=model, reference_input=reference_input
+    ).eval()
+
     means: list[np.ndarray] = []
     standard_deviations: list[np.ndarray] = []
 
-    for start in range(0, X_raw.shape[0], batch_size):
-        X_batch = torch.as_tensor(
-            X_raw[start : start + batch_size],
-            dtype=torch.float64,
-        )
-        X_norm = (X_batch - model.X_mean) / (model.X_std + 1e-6)
-
-        with torch.no_grad(), gpytorch.settings.fast_pred_var():
-            latent_distribution = model(X_norm)
+    with torch.no_grad(), gpytorch.settings.fast_pred_var():
+        for start in range(0, X_raw.shape[0], batch_size):
+            X_batch = torch.as_tensor(
+                X_raw[start : start + batch_size],
+                device=model_device,
+                dtype=model_dtype,
+            )
+            latent_distribution = predictor.latent_distribution(X_batch)
             distribution = (
                 likelihood(latent_distribution)
                 if include_likelihood_noise
                 else latent_distribution
             )
-            mean_norm = distribution.mean
-            variance_norm = distribution.variance.clamp_min(1e-12)
 
-        means.append(tensor_to_numpy(mean_norm * model.y_std + model.y_mean))
-        standard_deviations.append(
-            tensor_to_numpy(torch.sqrt(variance_norm) * torch.abs(model.y_std))
-        )
+            normalized_mean = distribution.mean
+            normalized_variance = distribution.variance.clamp_min(1.0e-12)
+
+            physical_mean = predictor.denormalize_mean(normalized_mean)
+            physical_standard_deviation = predictor.denormalize_std(
+                torch.sqrt(normalized_variance)
+            )
+
+            means.append(tensor_to_numpy(physical_mean))
+            standard_deviations.append(tensor_to_numpy(physical_standard_deviation))
 
     return np.concatenate(means), np.concatenate(standard_deviations)
 

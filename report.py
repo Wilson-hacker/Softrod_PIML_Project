@@ -206,6 +206,6 @@ def load_aggregate_results_from_artifact(
 
 
 if __name__ == "__main__":
-    results = load_aggregate_results_from_artifact("./data/paper_experiment_consistent_scaling.pkl")
+    results = load_aggregate_results_from_artifact("./data/paper_experiment_new.pkl")
     print_aggregate_table(results)
-    plot_main_experiment(data_path="./data/paper_experiment_consistent_scaling.pkl")
+    plot_main_experiment(data_path="./data/paper_experiment_new.pkl")

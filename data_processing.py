@@ -6,7 +6,7 @@ from typing import Mapping
 import numpy as np
 import torch
 
-from config import DatasetBundle, NormalizationStats, SamplingConfig
+from config import NORMALIZATION_EPS, DatasetBundle, NormalizationStats, SamplingConfig
 
 
 def seed_everything(seed: int) -> None:
@@ -152,7 +152,6 @@ def prepare_training_dataset(
     reference_data: Mapping[str, np.ndarray],
     sampling_config: SamplingConfig,
     seed: int,
-    normalization_eps: float = 1e-6,
 ) -> DatasetBundle:
     """Create training tensors, exact held-out indices, and normalization data."""
     X_all, y_p_all, y_q_all = make_flat_dataset_from_sim_data(reference_data)
@@ -180,12 +179,11 @@ def prepare_training_dataset(
         y_p_std=y_p_std,
         y_q_mean=y_q_mean,
         y_q_std=y_q_std,
-        eps=normalization_eps,
     )
 
-    X_train_norm = (X_train_raw - X_mean) / (X_std + normalization_eps)
-    y_p_train_norm = (y_p_train_raw - y_p_mean) / (y_p_std + normalization_eps)
-    y_q_train_norm = (y_q_train_raw - y_q_mean) / (y_q_std + normalization_eps)
+    X_train_norm = normalize_tensor(X_train_raw, X_mean, X_std)
+    y_p_train_norm = normalize_tensor(y_p_train_raw, y_p_mean, y_p_std)
+    y_q_train_norm = normalize_tensor(y_q_train_raw, y_q_mean, y_q_std)
 
     q_reference = np.asarray(reference_data["q"])
 
@@ -215,6 +213,65 @@ def prepare_training_dataset(
     )
 
 
+def normalize_tensor(
+    values: torch.Tensor,
+    mean: torch.Tensor,
+    standard_deviation: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Normalize a tensor using precomputed statistics.
+
+    All statistics are converted to the input tensor's dtype and device.
+    """
+    mean_aligned = mean.to(device=values.device, dtype=values.dtype)
+
+    standard_deviation_aligned = standard_deviation.to(
+        device=values.device, dtype=values.dtype
+    )
+
+    scale = standard_deviation_aligned + NORMALIZATION_EPS
+
+    return (values - mean_aligned) / scale
+
+
+def denormalize_tensor(
+    normalized_values: torch.Tensor,
+    mean: torch.Tensor,
+    standard_deviation: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Convert normalized values back to physical units.
+    """
+    mean_aligned = mean.to(
+        device=normalized_values.device, dtype=normalized_values.dtype
+    )
+
+    standard_deviation_aligned = standard_deviation.to(
+        device=normalized_values.device, dtype=normalized_values.dtype
+    )
+
+    scale = standard_deviation_aligned + NORMALIZATION_EPS
+
+    return normalized_values * scale + mean_aligned
+
+
+def denormalize_standard_deviation(
+    normalized_standard_deviation: torch.Tensor,
+    standard_deviation: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Convert a predictive standard deviation to physical units.
+    """
+    standard_deviation_aligned = standard_deviation.to(
+        device=normalized_standard_deviation.device,
+        dtype=normalized_standard_deviation.dtype,
+    )
+
+    scale = torch.abs(standard_deviation_aligned + NORMALIZATION_EPS)
+
+    return normalized_standard_deviation * scale
+
+
 def normalize_changepoint_params(
     location_physical: float,
     width_physical: float,
@@ -222,5 +279,5 @@ def normalize_changepoint_params(
     z_col: int = 2,
 ) -> tuple[float, float]:
     z_mean = float(normalization.X_mean[z_col].detach().cpu())
-    z_std = float(normalization.X_std[z_col].detach().cpu()) + normalization.eps
+    z_std = float(normalization.X_std[z_col].detach().cpu()) + NORMALIZATION_EPS
     return (location_physical - z_mean) / z_std, width_physical / z_std

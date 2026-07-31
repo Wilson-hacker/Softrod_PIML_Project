@@ -21,6 +21,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
     ARTIFACT_SCHEMA_VERSION,
+    NORMALIZATION_EPS,
     AggregateResult,
     DatasetBundle,
     EvaluationConfig,
@@ -37,6 +38,11 @@ from config import (
     TrainedModels,
     TrainingConfig,
 )
+from data_processing import (
+    normalize_changepoint_params,
+    prepare_training_dataset,
+    seed_everything,
+)
 from metrics import (
     aggregate_run_results,
     evaluate_gp_phs_model,
@@ -49,11 +55,6 @@ from rollout import (
     attach_normalization_stats,
     reconstruct_displacement_from_strain,
     simulate_gp_phs,
-)
-from sampling import (
-    normalize_changepoint_params,
-    prepare_training_dataset,
-    seed_everything,
 )
 from simulator import SoftRodSimulator
 
@@ -139,7 +140,6 @@ def create_simulation_bundle(
 def get_training_dataset(
     simulation: SimulationBundle,
     sampling_config: SamplingConfig,
-    training_config: TrainingConfig,
     seed: int,
 ) -> DatasetBundle:
     """Prepare one seed's exact training set, held-out set, and targets."""
@@ -147,7 +147,6 @@ def get_training_dataset(
         reference_data=simulation.training_data,
         sampling_config=sampling_config,
         seed=seed,
-        normalization_eps=training_config.normalization_eps,
     )
 
 
@@ -249,7 +248,6 @@ def run_pipeline(
     dataset = get_training_dataset(
         simulation,
         pipeline_config.sampling,
-        pipeline_config.training,
         seed,
     )
 
@@ -601,6 +599,7 @@ def run_experiment_matrix(
 
     artifact: dict[str, Any] = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "normalization_eps": NORMALIZATION_EPS,
         "experiment_order": [],
         "experiments": {},
     }
@@ -670,6 +669,20 @@ def build_paper_experiments(
     }
 
     return (
+        ExperimentSpec(
+            name="constant",
+            row_label="Constant",
+            simulator=SimulatorConfig(
+                **common_simulator,
+                stiffness_profile="constant",
+                num_hinges=4,
+            ),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.06),
+            models=(
+                baseline,
+            ),
+            seeds=seeds,
+        ),
         ExperimentSpec(
             name="periodic",
             row_label="Periodic",
@@ -760,5 +773,5 @@ def compute_main_experiment(
 
 if __name__ == "__main__":
     compute_main_experiment(
-        save_results_path="./data/paper_experiment_consistent_scaling2.pkl"
+        save_results_path="./data/paper_experiment_new.pkl"
     )

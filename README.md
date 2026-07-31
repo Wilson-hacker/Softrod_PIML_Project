@@ -98,12 +98,13 @@ A typical organization of the codebase is:
 ├── config.py               # Dataclasses and experiment configuration
 ├── simulator.py            # Soft-rod/string simulator and stiffness profiles
 ├── kernels.py              # Baseline and structure-aware GP kernels
-├── model.py                # Exact GP model and training loop
-├── sampling.py             # Training-point selection
+├── model.py                # GP model definition and training loop
+├── data_processing.py      # Sampling and normalization
 ├── rollout.py              # GP-PHS rollout and displacement reconstruction
 ├── metrics.py              # Numerical and physics-informed evaluation metrics
 ├── plotting.py             # Artifact-based plotting functions
-└── results/                # Generated artifacts, tables, and figures
+├── data/                   # Generated .pkl artifacts
+└── plots/                  # Generated figures
 ```
 
 The exact structure may differ slightly as the project evolves.

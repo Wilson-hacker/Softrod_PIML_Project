@@ -77,7 +77,6 @@ def plot_multi_profile_rollout_grid_from_artifact(
 
         z = np.asarray(profile["z"])
         dt = float(profile["dt"])
-        dz = float(profile["dz"])
 
         u_reference = np.asarray(profile["u_reference"])
 

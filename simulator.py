@@ -264,17 +264,13 @@ class SoftRodSimulator:
         motor_pulse = np.sin(2.0 * np.pi * t)
         return self.motor_location * motor_pulse
 
-    def evaluate_ph_dynamics(self, p, q, grad_H_p, grad_H_q, t):
+    def evaluate_ph_dynamics(self, grad_H_p, grad_H_q, t):
         """
         The core Port-Hamiltonian structural physics mapping:
         dx/dt = (J - R) * dH/dx + G * u(t)
         """
-        # dp_dt = np.zeros_like(p)
-        # dq_dt = np.zeros_like(q)
-        #
-        # # J matrix (Interconnection via spatial derivative)
-        # dq_dt[1:-1] = (grad_H_p[2:] - grad_H_p[:-2]) / (2 * self.dz)
-        # dp_dt[1:-1] = (grad_H_q[2:] - grad_H_q[:-2]) / (2 * self.dz)
+
+        # J matrix (Interconnection via spatial derivative)
         dq_dt = spatial_derivative_centered(grad_H_p, self.dz, boundary_value=0.0)
         dp_dt = spatial_derivative_centered(grad_H_q, self.dz, boundary_value=0.0)
 
@@ -296,7 +292,7 @@ class SoftRodSimulator:
         q = state[self.N :]
 
         return self.evaluate_ph_dynamics(
-            p, q, grad_H_p=self.dEdp(p), grad_H_q=self.dEdq(q), t=t
+            grad_H_p=self.dEdp(p), grad_H_q=self.dEdq(q), t=t
         )
 
     def generate_dataset(self, get_init_q_config):

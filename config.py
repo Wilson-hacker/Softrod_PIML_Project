@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Mapping, TypeAlias
+from typing import Any, Callable, Final, Literal, Mapping, TypeAlias
 
 import numpy as np
 import torch
 
 ARTIFACT_SCHEMA_VERSION = 2
+NORMALIZATION_EPS: Final[float] = 1e-6
 
 SamplingMethod = Literal["random", "stratified"]
 ODESolverMethod: TypeAlias = Literal[
@@ -189,7 +190,6 @@ class TrainingConfig:
     min_delta: float = 1e-3
     learning_rate: float = 0.1
     log_interval: int = 20
-    normalization_eps: float = 1e-6
     verbose: bool = False
 
     def __post_init__(self) -> None:
@@ -203,8 +203,6 @@ class TrainingConfig:
             raise ValueError("learning_rate must be positive.")
         if self.log_interval <= 0:
             raise ValueError("log_interval must be positive.")
-        if self.normalization_eps <= 0.0:
-            raise ValueError("normalization_eps must be positive.")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -213,7 +211,6 @@ class TrainingConfig:
             "min_delta": self.min_delta,
             "learning_rate": self.learning_rate,
             "log_interval": self.log_interval,
-            "normalization_eps": self.normalization_eps,
             "verbose": self.verbose,
         }
 
@@ -348,7 +345,6 @@ class NormalizationStats:
     y_p_std: torch.Tensor
     y_q_mean: torch.Tensor
     y_q_std: torch.Tensor
-    eps: float
 
 
 @dataclass

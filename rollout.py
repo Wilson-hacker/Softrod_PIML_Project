@@ -9,7 +9,16 @@ import numpy as np
 import torch
 from scipy.integrate import cumulative_trapezoid, solve_ivp
 
-from config import InitialCondition, NormalizationStats, TrainedModels
+from config import (
+    InitialCondition,
+    NormalizationStats,
+    TrainedModels,
+)
+from data_processing import (
+    denormalize_standard_deviation,
+    denormalize_tensor,
+    normalize_tensor,
+)
 
 
 class PhysicalMeanPredictor(torch.nn.Module):
@@ -19,6 +28,11 @@ class PhysicalMeanPredictor(torch.nn.Module):
     The normalization tensors are prepared once rather than transferred or
     retrieved repeatedly during every ODE right-hand-side evaluation.
     """
+
+    X_mean: torch.Tensor
+    X_std: torch.Tensor
+    y_mean: torch.Tensor
+    y_std: torch.Tensor
 
     def __init__(
         self,
@@ -57,15 +71,50 @@ class PhysicalMeanPredictor(torch.nn.Module):
             y_std.detach().to(device=device).clone(),
         )
 
+    def normalize_inputs(
+        self,
+        X_raw: torch.Tensor,
+    ) -> torch.Tensor:
+        return normalize_tensor(
+            values=X_raw, mean=self.X_mean, standard_deviation=self.X_std
+        )
+
+    def latent_distribution(
+        self,
+        X_raw: torch.Tensor,
+    ) -> gpytorch.distributions.MultivariateNormal:
+        X_normalized = self.normalize_inputs(X_raw)
+
+        distribution = self.model(X_normalized)
+
+        return cast(gpytorch.distributions.MultivariateNormal, distribution)
+
+    def denormalize_mean(
+        self,
+        normalized_mean: torch.Tensor,
+    ) -> torch.Tensor:
+        return denormalize_tensor(
+            normalized_values=normalized_mean,
+            mean=self.y_mean,
+            standard_deviation=self.y_std,
+        )
+
+    def denormalize_std(
+        self,
+        normalized_standard_deviation: torch.Tensor,
+    ) -> torch.Tensor:
+        return denormalize_standard_deviation(
+            normalized_standard_deviation=normalized_standard_deviation,
+            standard_deviation=self.y_std,
+        )
+
     def forward(
         self,
         X_raw: torch.Tensor,
     ) -> torch.Tensor:
-        X_normalized = (X_raw - self.X_mean) / (self.X_std + 1e-6)
-        posterior = self.model(X_normalized)
-        posterior_mean = cast(torch.Tensor, posterior.mean)
-
-        return posterior_mean * self.y_std + self.y_mean
+        distribution = self.latent_distribution(X_raw)
+        normalized_mean = distribution.mean
+        return self.denormalize_mean(normalized_mean)
 
 
 def attach_normalization_stats(
@@ -258,19 +307,12 @@ def simulate_gp_phs(
             grad_H_q = tensor_to_numpy(predict_dHdq(X_raw_tensor))
 
             return simulator.evaluate_ph_dynamics(
-                p=p,
-                q=q,
-                grad_H_p=grad_H_p,
-                grad_H_q=grad_H_q,
-                t=t,
+                grad_H_p=grad_H_p, grad_H_q=grad_H_q, t=t
             )
 
         solution = solve_ivp(
             fun=gp_pde_rhs,
-            t_span=(
-                0.0,
-                float(simulator.T),
-            ),
+            t_span=(0.0, float(simulator.T)),
             y0=state0,
             t_eval=t_eval,
             method=solver_config.method,
@@ -312,9 +354,4 @@ def reconstruct_displacement_from_strain(
     if q.ndim != 2:
         raise ValueError("q must have shape (N_z, N_t).")
 
-    return cumulative_trapezoid(
-        q,
-        dx=dz,
-        axis=0,
-        initial=0,
-    )
+    return cumulative_trapezoid(q, dx=dz, axis=0, initial=0)
