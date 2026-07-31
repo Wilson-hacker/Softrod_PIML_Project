@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -146,77 +145,10 @@ MeanPredictor = Callable[
 ]
 
 
-def prepare_mean_predictor(
-    model: Any,
-    example_input: torch.Tensor,
-    use_torch_compile: bool,
-) -> MeanPredictor:
-    """
-    Construct and optionally compile a fixed-shape physical-mean predictor.
-
-    The eager call initializes the ExactGP prediction cache before compilation.
-    The first compiled call triggers compilation and verifies that its output
-    agrees with the eager implementation.
-    """
-    model.eval()
-
-    predictor = PhysicalMeanPredictor(
-        model=model,
-        reference_input=example_input,
-    ).eval()
-
-    # This first call also initializes GPyTorch's ExactGP prediction strategy.
-    eager_output = predictor(example_input).detach().clone()
-
-    if not use_torch_compile:
-        return predictor
-
-    if not hasattr(torch, "compile"):
-        warnings.warn(
-            "torch.compile is unavailable in this PyTorch version. "
-            "Using the eager GP predictor.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-        return predictor
-
-    try:
-        compiled_predictor = torch.compile(
-            predictor,
-            dynamic=False,
-            fullgraph=False,
-        )
-
-        # Compilation normally occurs on the first invocation.
-        compiled_output = compiled_predictor(example_input)
-
-        torch.testing.assert_close(
-            compiled_output,
-            eager_output,
-            rtol=1e-6,
-            atol=1e-8,
-        )
-
-        return compiled_predictor
-
-    except Exception as error:
-        warnings.warn(
-            "torch.compile could not compile the GP predictor; "
-            "falling back to eager inference. "
-            f"Reason: {error}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-        return predictor
-
-
 def simulate_gp_phs(
     simulator: Any,
     models: TrainedModels,
     initial_condition: InitialCondition,
-    compile_gp_predictors: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Integrate the learned GP-PHS dynamics.
@@ -279,17 +211,14 @@ def simulate_gp_phs(
     # Put the context around predictor preparation and the entire synchronous
     # solve rather than entering torch.no_grad() inside every RHS evaluation.
     with torch.no_grad(), gpytorch.settings.skip_posterior_variances(True):
-        predict_dHdp = prepare_mean_predictor(
-            model=models.dEdp_model,
-            example_input=X_raw_tensor,
-            use_torch_compile=compile_gp_predictors,
-        )
-
-        predict_dHdq = prepare_mean_predictor(
-            model=models.dEdq_model,
-            example_input=X_raw_tensor,
-            use_torch_compile=compile_gp_predictors,
-        )
+        models.dEdp_model.eval()
+        models.dEdq_model.eval()
+        predict_dHdp = PhysicalMeanPredictor(
+            model=models.dEdp_model, reference_input=X_raw_tensor
+        ).eval()
+        predict_dHdq = PhysicalMeanPredictor(
+            model=models.dEdq_model, reference_input=X_raw_tensor
+        ).eval()
 
         def gp_pde_rhs(
             t: float,

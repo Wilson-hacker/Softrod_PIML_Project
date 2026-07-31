@@ -266,7 +266,6 @@ def run_pipeline(
         simulator=simulation.simulator,
         models=trained_models,
         initial_condition=rollout_initial_condition,
-        compile_gp_predictors=pipeline_config.evaluation.compile_gp_predictors,
     )
 
     if verbose:

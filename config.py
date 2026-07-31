@@ -267,7 +267,6 @@ class EvaluationConfig:
     curl_batch_size: int = 256
     force_edge: int = 5
     include_likelihood_noise: bool = True
-    compile_gp_predictors: bool = False
 
     def __post_init__(self) -> None:
         if self.curl_max_points <= 0:
@@ -283,7 +282,6 @@ class EvaluationConfig:
             "curl_batch_size": self.curl_batch_size,
             "force_edge": self.force_edge,
             "include_likelihood_noise": self.include_likelihood_noise,
-            "compile_gp_predictors": self.compile_gp_predictors,
         }
 
 

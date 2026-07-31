@@ -16,6 +16,7 @@ from plotting import (
 
 def plot_main_experiment(
     data_path: str = "./data/paper_experiment.pkl",
+    save_path: str = "./plots/rollout_plts.pdf",
 ) -> None:
     artifact = load_experiment_artifact(data_path)
 
@@ -23,7 +24,7 @@ def plot_main_experiment(
         artifact,
         experiment_filter=["periodic", "C2", "piecewise"],
         time_slices=(0, 50, 100),
-        save_path="./plots/rollout_consistent_scaling.pdf",
+        save_path=save_path,
     )
 
 
@@ -47,7 +48,7 @@ def print_aggregate_table(
     for experiment_name, model_results in results.items():
         for model_label, aggregate in model_results.items():
             values = " ".join(
-                f"{aggregate.mean_metrics[column]:>9.3e}±"
+                f"{aggregate.mean_metrics[column]:>9.2e}±"
                 f"{aggregate.std_metrics[column]:<7.1e}"
                 for column in columns
             )
@@ -206,6 +207,7 @@ def load_aggregate_results_from_artifact(
 
 
 if __name__ == "__main__":
-    results = load_aggregate_results_from_artifact("./data/paper_experiment_new.pkl")
+    result_path = "./data/paper_experiment_n100.pkl"
+    results = load_aggregate_results_from_artifact(result_path)
     print_aggregate_table(results)
-    plot_main_experiment(data_path="./data/paper_experiment_new.pkl")
+    plot_main_experiment(data_path=result_path, save_path="./plots/rollout_n100.pdf")
