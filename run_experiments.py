@@ -22,7 +22,9 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from config import (
     ARTIFACT_SCHEMA_VERSION,
     NORMALIZATION_EPS,
+    Z_INDEX,
     AggregateResult,
+    ChangepointEstimate,
     DatasetBundle,
     EvaluationConfig,
     ExperimentSpec,
@@ -43,6 +45,7 @@ from data_processing import (
     prepare_training_dataset,
     seed_everything,
 )
+from kernels import ChangepointSpatialKernel, StructuralDecoupledKernel
 from metrics import (
     aggregate_run_results,
     evaluate_gp_phs_model,
@@ -63,6 +66,34 @@ def default_initial_q(z: np.ndarray, length: float) -> np.ndarray:
     """Initial strain profile used in the paper experiments."""
     center = length / 2.0
     return -4.0 * (z - center) * np.exp(-((z - center) ** 2))
+
+
+def print_changepoint_summary(
+    result: AggregateResult,
+) -> None:
+    mean = result.changepoint_mean
+    standard_deviation = result.changepoint_std
+
+    if mean is None:
+        return
+
+    if standard_deviation is None:
+        raise RuntimeError(
+            "Changepoint mean is present but its standard deviation is missing."
+        )
+
+    print(
+        "[CHANGEPOINT] "
+        f"experiment={result.experiment_name}, "
+        f"model={result.model_label}, "
+        f"seeds={len(result.runs)}\n"
+        f"    center = "
+        f"{mean.center:.6f} ± "
+        f"{standard_deviation.center:.6f}\n"
+        f"    width  = "
+        f"{mean.width:.6f} ± "
+        f"{standard_deviation.width:.6f}"
+    )
 
 
 def initialize_seed_worker(
@@ -181,7 +212,7 @@ def train_effort_models(
 
     dEdp_config = ModelConfig(
         label=f"{pipeline_config.model.label}-dHdp",
-        kernel_type="baseline",
+        kernel_type="rbf",
     )
 
     dEdq_config = resolve_model_config(
@@ -216,6 +247,43 @@ def train_effort_models(
     )
 
     return models
+
+
+def extract_learned_changepoint(
+    dEdq_model: Any,
+    z_index: int = Z_INDEX,
+) -> ChangepointEstimate | None:
+    """
+    Extract the learned changepoint center and width in physical units.
+
+    This assumes that the changepoint kernel acts on normalized z.
+    """
+    structural_kernel = dEdq_model.covar_module.base_kernel
+    changepoint_kernel = None
+    if isinstance(structural_kernel, StructuralDecoupledKernel) and isinstance(
+        structural_kernel.spatial_kernel, ChangepointSpatialKernel
+    ):
+        changepoint_kernel = structural_kernel.spatial_kernel
+
+    if changepoint_kernel is None:
+        return None
+
+    location_normalized = changepoint_kernel.location
+    width_normalized = changepoint_kernel.width
+
+    X_mean = dEdq_model.X_mean
+    X_std = dEdq_model.X_std
+
+    z_mean = X_mean[z_index].detach()
+    z_scale = X_std[z_index].detach() + NORMALIZATION_EPS
+
+    location_physical = location_normalized.detach().reshape(()) * z_scale + z_mean
+    width_physical = width_normalized.detach().reshape(()) * torch.abs(z_scale)
+
+    return ChangepointEstimate(
+        center=float(location_physical.cpu().item()),
+        width=float(width_physical.cpu().item()),
+    )
 
 
 def run_pipeline(
@@ -284,6 +352,10 @@ def run_pipeline(
     if pipeline_config.training.verbose:
         print_metrics_report(metrics)
 
+    learned_changepoint = extract_learned_changepoint(
+        trained_models.dEdq_model, z_index=Z_INDEX
+    )
+
     return RunResult(
         experiment_name=(pipeline_config.simulator.stiffness_profile),
         model_label=pipeline_config.model.label,
@@ -295,6 +367,7 @@ def run_pipeline(
         H_reference=np.asarray(H_reference),
         H_gp=np.asarray(H_gp),
         dHdq_summary={key: np.asarray(value) for key, value in dHdq_summary.items()},
+        changepoint=learned_changepoint,
     )
 
 
@@ -359,90 +432,88 @@ def run_model_over_seeds(
             )
         )
 
-        return aggregate_run_results(runs)
-
-    max_workers, torch_threads = resolve_parallel_resources(
-        parallel_config,
-        number_of_jobs=len(seeds),
-    )
-
-    print(
-        f"\nRunning {len(seeds)} seeds using "
-        f"{max_workers} processes and "
-        f"{torch_threads} Torch threads per process."
-    )
-
-    training_data = {
-        key: np.asarray(value) for key, value in simulation.training_data.items()
-    }
-
-    evaluation_data = {
-        key: np.asarray(value) for key, value in simulation.evaluation_data.items()
-    }
-
-    jobs = [
-        SeedJob(
-            pipeline_config=pipeline_config,
-            seed=seed,
-            training_data=training_data,
-            evaluation_data=evaluation_data,
+    else:
+        max_workers, torch_threads = resolve_parallel_resources(
+            parallel_config, number_of_jobs=len(seeds)
         )
-        for seed in seeds
-    ]
 
-    context = mp.get_context(parallel_config.start_method)
+        print(
+            f"\nRunning {len(seeds)} seeds using "
+            f"{max_workers} processes and "
+            f"{torch_threads} Torch threads per process."
+        )
 
-    results_by_seed: dict[int, RunResult] = {}
-
-    with ProcessPoolExecutor(
-        max_workers=max_workers,
-        mp_context=context,
-        initializer=initialize_seed_worker,
-        initargs=(torch_threads,),
-    ) as executor:
-        future_to_seed: dict[
-            Future[RunResult],
-            int,
-        ] = {
-            executor.submit(
-                run_seed_worker,
-                job,
-            ): job.seed
-            for job in jobs
+        training_data = {
+            key: np.asarray(value) for key, value in simulation.training_data.items()
         }
 
-        # current_seed: int | str = "unknown"
+        evaluation_data = {
+            key: np.asarray(value) for key, value in simulation.evaluation_data.items()
+        }
 
-        try:
-            completed_futures = as_completed(future_to_seed)
+        jobs = [
+            SeedJob(
+                pipeline_config=pipeline_config,
+                seed=seed,
+                training_data=training_data,
+                evaluation_data=evaluation_data,
+            )
+            for seed in seeds
+        ]
 
-            for future in tqdm(
-                completed_futures,
-                total=len(future_to_seed),
-                desc=progress_description,
-                unit="seed",
-            ):
-                current_seed = future_to_seed[future]
+        context = mp.get_context(parallel_config.start_method)
 
-                result = future.result()
-                results_by_seed[current_seed] = result
+        results_by_seed: dict[int, RunResult] = {}
 
-                tqdm.write(
-                    f"[COMPLETED] {pipeline_config.model.label}, seed={current_seed}"
-                )
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=context,
+            initializer=initialize_seed_worker,
+            initargs=(torch_threads,),
+        ) as executor:
+            future_to_seed: dict[
+                Future[RunResult],
+                int,
+            ] = {
+                executor.submit(
+                    run_seed_worker,
+                    job,
+                ): job.seed
+                for job in jobs
+            }
 
-        except Exception as error:
-            for submitted_future in future_to_seed:
-                submitted_future.cancel()
+            try:
+                completed_futures = as_completed(future_to_seed)
 
-            raise RuntimeError(
-                f"Parallel run failed for seed {current_seed}."
-            ) from error
+                for future in tqdm(
+                    completed_futures,
+                    total=len(future_to_seed),
+                    desc=progress_description,
+                    unit="seed",
+                ):
+                    current_seed = future_to_seed[future]
 
-    # Restore the user-specified seed order.
-    runs = tuple(results_by_seed[seed] for seed in seeds)
+                    result = future.result()
+                    results_by_seed[current_seed] = result
 
-    return aggregate_run_results(runs)
+                    tqdm.write(
+                        f"[COMPLETED] {pipeline_config.model.label}, seed={current_seed}"
+                    )
+
+            except Exception as error:
+                for submitted_future in future_to_seed:
+                    submitted_future.cancel()
+
+                raise RuntimeError(
+                    f"Parallel run failed for seed {current_seed}."
+                ) from error
+
+        # Restore the user-specified seed order.
+        runs = tuple(results_by_seed[seed] for seed in seeds)
+
+    aggregate = aggregate_run_results(runs)
+    print_changepoint_summary(aggregate)
+    return aggregate
 
 
 def compute_mean_diagnostic_curves(
@@ -649,7 +720,7 @@ def build_paper_experiments(
 ) -> tuple[ExperimentSpec, ...]:
     baseline = ModelConfig(
         label="Baseline",
-        kernel_type="baseline",
+        kernel_type="rbf",
         spatial_kernel="rbf",
     )
     sd_rbf = ModelConfig(
@@ -657,13 +728,13 @@ def build_paper_experiments(
         kernel_type="SD",
         spatial_kernel="rbf",
     )
-    common_simulator = {"L": 10.0, "N": 60, "T": 5.5, "dt": 0.05, "profile_seed": 42}
+    common_simulator = {"L": 10.0, "N": 100, "T": 5.5, "dt": 0.05, "profile_seed": 42}
     common_sampling = {
         "method": "stratified",
         "left_region": (0.0, 2.0),
         "middle_region": (2.0, 8.0),
         "right_region": (8.0, 10.0),
-        "weights": (0.30, 0.40, 0.30),
+        "weights": (0.35, 0.30, 0.35),
         "include_domain_boundaries": True,
     }
 
@@ -676,7 +747,7 @@ def build_paper_experiments(
                 stiffness_profile="constant",
                 num_hinges=4,
             ),
-            sampling=SamplingConfig(**common_sampling, train_fraction=0.06),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
             models=(
                 baseline,
             ),
@@ -690,7 +761,7 @@ def build_paper_experiments(
                 stiffness_profile="periodic",
                 num_hinges=4,
             ),
-            sampling=SamplingConfig(**common_sampling, train_fraction=0.06),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
             models=(
                 baseline,
                 sd_rbf,
@@ -710,7 +781,7 @@ def build_paper_experiments(
                 stiffness_profile="C2",
                 num_hinges=8,
             ),
-            sampling=SamplingConfig(**common_sampling, train_fraction=0.06),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
             models=(
                 baseline,
                 sd_rbf,
@@ -740,7 +811,92 @@ def build_paper_experiments(
                     kernel_type="SD",
                     spatial_kernel="changepoint",
                     changepoint_location=5.0,
-                    changepoint_width=0.15,
+                    changepoint_width=0.20,
+                ),
+            ),
+            seeds=seeds,
+        ),
+    )
+
+
+def changepoint_robostness_experiments(
+    seeds: tuple[int, ...] = (6, 42, 79, 123, 456),
+) -> tuple[ExperimentSpec, ...]:
+    baseline = ModelConfig(
+        label="Baseline",
+        kernel_type="rbf",
+        spatial_kernel="rbf",
+    )
+    common_simulator = {"L": 10.0, "N": 100, "T": 5.5, "dt": 0.05, "profile_seed": 42}
+    common_sampling = {
+        "method": "stratified",
+        "left_region": (0.0, 2.0),
+        "middle_region": (2.0, 8.0),
+        "right_region": (8.0, 10.0),
+        "weights": (0.35, 0.30, 0.35),
+        "include_domain_boundaries": True,
+    }
+
+    return (
+        ExperimentSpec(
+            name="piecewise",
+            row_label="Semi-piecewise",
+            simulator=SimulatorConfig(
+                **common_simulator,
+                stiffness_profile="piecewise",
+                num_hinges=2,
+            ),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
+            models=(
+                baseline,
+                ModelConfig(
+                    label="SD-matched",
+                    kernel_type="SD",
+                    spatial_kernel="changepoint",
+                    changepoint_location=5.0,
+                    changepoint_width=0.20,
+                ),
+                ModelConfig(
+                    label="SD-ptb-W0.1",
+                    kernel_type="SD",
+                    spatial_kernel="changepoint",
+                    changepoint_location=5.0,
+                    changepoint_width=0.22,
+                ),
+                ModelConfig(
+                    label="SD-ptb-W0.2",
+                    kernel_type="SD",
+                    spatial_kernel="changepoint",
+                    changepoint_location=5.0,
+                    changepoint_width=0.24,
+                ),
+                ModelConfig(
+                    label="SD-ptb-W0.5",
+                    kernel_type="SD",
+                    spatial_kernel="changepoint",
+                    changepoint_location=5.0,
+                    changepoint_width=0.30,
+                ),
+                ModelConfig(
+                    label="SD-ptb-P0.1",
+                    kernel_type="SD",
+                    spatial_kernel="changepoint",
+                    changepoint_location=5.5,
+                    changepoint_width=0.20,
+                ),
+                ModelConfig(
+                    label="SD-ptb-P0.2",
+                    kernel_type="SD",
+                    spatial_kernel="changepoint",
+                    changepoint_location=6.0,
+                    changepoint_width=0.20,
+                ),
+                ModelConfig(
+                    label="SD-ptb-P0.5",
+                    kernel_type="SD",
+                    spatial_kernel="changepoint",
+                    changepoint_location=7.5,
+                    changepoint_width=0.20,
                 ),
             ),
             seeds=seeds,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 import gpytorch
 import numpy as np
@@ -8,6 +8,7 @@ import torch
 
 from config import (
     AggregateResult,
+    ChangepointEstimate,
     DatasetBundle,
     EvaluationConfig,
     RunResult,
@@ -403,6 +404,18 @@ def extract_selected_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
     }
 
 
+def aggregate_scalar_values(
+    values: Sequence[float],
+) -> tuple[float, float]:
+    values_array = np.asarray(values, dtype=float)
+    mean = float(values_array.mean())
+    standard_deviation = (
+        float(values_array.std(ddof=1)) if values_array.size > 1 else 0.0
+    )
+
+    return mean, standard_deviation
+
+
 def aggregate_run_results(runs: Sequence[RunResult]) -> AggregateResult:
     if not runs:
         raise ValueError("At least one run is required for aggregation.")
@@ -420,11 +433,35 @@ def aggregate_run_results(runs: Sequence[RunResult]) -> AggregateResult:
 
     for key in SELECTED_METRIC_PATHS:
         values = np.asarray([entry[key] for entry in selected], dtype=float)
-        mean_metrics[key] = float(values.mean())
-        std_metrics[key] = float(values.std(ddof=1)) if values.size > 1 else 0.0
+        mean_metrics[key], std_metrics[key] = aggregate_scalar_values(values)
 
     p_stack = np.stack([run.p_gp for run in runs], axis=0)
     q_stack = np.stack([run.q_gp for run in runs], axis=0)
+
+    changepoints = [run.changepoint for run in runs]
+
+    if all(changepoint is None for changepoint in changepoints):
+        changepoint_mean = None
+        changepoint_std = None
+
+    elif any(changepoint is None for changepoint in changepoints):
+        raise ValueError(
+            "Some seeds contain learned changepoint parameters while others do not."
+        )
+
+    else:
+        valid_changepoints = [
+            cast(ChangepointEstimate, changepoint) for changepoint in changepoints
+        ]
+        center_mean, center_std = aggregate_scalar_values(
+            [changepoint.center for changepoint in valid_changepoints]
+        )
+        width_mean, width_std = aggregate_scalar_values(
+            [changepoint.width for changepoint in valid_changepoints]
+        )
+
+        changepoint_mean = ChangepointEstimate(center=center_mean, width=width_mean)
+        changepoint_std = ChangepointEstimate(center=center_std, width=width_std)
 
     return AggregateResult(
         experiment_name=first.experiment_name,
@@ -440,6 +477,8 @@ def aggregate_run_results(runs: Sequence[RunResult]) -> AggregateResult:
         q_gp_std=q_stack.std(axis=0, ddof=1)
         if len(runs) > 1
         else np.zeros_like(q_stack[0]),
+        changepoint_mean=changepoint_mean,
+        changepoint_std=changepoint_std,
     )
 
 

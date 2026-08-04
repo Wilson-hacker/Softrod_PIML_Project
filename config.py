@@ -10,6 +10,16 @@ import torch
 ARTIFACT_SCHEMA_VERSION = 2
 NORMALIZATION_EPS: Final[float] = 1e-6
 
+P_INDEX: Final[int] = 0
+Q_INDEX: Final[int] = 1
+Z_INDEX: Final[int] = 2
+
+INPUT_VARIABLE_INDICES: Final[dict[InputVariable, int]] = {
+    "p": P_INDEX,
+    "q": Q_INDEX,
+    "z": Z_INDEX,
+}
+
 SamplingMethod = Literal["random", "stratified"]
 ODESolverMethod: TypeAlias = Literal[
     "RK23",
@@ -19,8 +29,10 @@ ODESolverMethod: TypeAlias = Literal[
     "BDF",
     "LSODA",
 ]
-KernelType = Literal["baseline", "P_only", "SD", "warped"]
+InputVariable: TypeAlias = Literal["p", "q", "z"]
+KernelType = Literal["rbf", "reduced_input", "SD", "warped"]
 StrainKernelType = Literal["rbf", "linear"]
+ReducedBaseKernel: TypeAlias = Literal["rbf", "linear"]
 SpatialKernelType = Literal[
     "rbf",
     "periodic",
@@ -141,7 +153,9 @@ class ModelConfig:
     """Configuration of one GP-PHS covariance architecture."""
 
     label: str
-    kernel_type: KernelType = "baseline"
+    reduced_input_variables: tuple[InputVariable, ...] = ("q", "z")
+    kernel_type: KernelType = "rbf"
+    reduced_input_base_kernel: ReducedBaseKernel = "rbf"
     strain_kernel: StrainKernelType = "rbf"
     spatial_kernel: SpatialKernelType = "rbf"
     matern_nu: float = 2.5
@@ -171,7 +185,9 @@ class ModelConfig:
         """Serialize the configuration for experiment artifacts."""
         return {
             "label": self.label,
+            "reduced_input_variables": list(self.reduced_input_variables),
             "kernel_type": self.kernel_type,
+            "reduced_input_base_kernel": self.reduced_input_base_kernel,
             "strain_kernel": self.strain_kernel,
             "spatial_kernel": self.spatial_kernel,
             "matern_nu": self.matern_nu,
@@ -345,6 +361,14 @@ class NormalizationStats:
     y_q_std: torch.Tensor
 
 
+@dataclass(frozen=True)
+class ChangepointEstimate:
+    """Learned changepoint parameters in physical spatial units."""
+
+    center: float
+    width: float
+
+
 @dataclass
 class DatasetBundle:
     reference_data: Mapping[str, np.ndarray]
@@ -392,6 +416,7 @@ class RunResult:
     H_reference: np.ndarray
     H_gp: np.ndarray
     dHdq_summary: dict[str, np.ndarray]
+    changepoint: ChangepointEstimate | None = None
 
 
 @dataclass
@@ -405,6 +430,8 @@ class AggregateResult:
     p_gp_std: np.ndarray
     q_gp_mean: np.ndarray
     q_gp_std: np.ndarray
+    changepoint_mean: ChangepointEstimate | None = None
+    changepoint_std: ChangepointEstimate | None = None
 
 
 @dataclass(frozen=True)

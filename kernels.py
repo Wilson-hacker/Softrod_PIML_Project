@@ -3,11 +3,15 @@ from __future__ import annotations
 import gpytorch
 import torch
 
-from config import ModelConfig
-
-P_INDEX = 0
-Q_INDEX = 1
-Z_INDEX = 2
+from config import (
+    INPUT_VARIABLE_INDICES,
+    P_INDEX,
+    Q_INDEX,
+    Z_INDEX,
+    InputVariable,
+    ModelConfig,
+    ReducedBaseKernel,
+)
 
 
 class BaselineRBFKernel(gpytorch.kernels.Kernel):
@@ -21,17 +25,26 @@ class BaselineRBFKernel(gpytorch.kernels.Kernel):
         return self.base_kernel(x1, x2, diag=diag, **params)
 
 
-class MomentumKernel(gpytorch.kernels.Kernel):
-    def __init__(self, **kwargs):
+class ReducedInputRBFKernel(gpytorch.kernels.Kernel):
+    """Stationary ARD-RBF covariance on the full standardized state."""
+
+    def __init__(
+        self,
+        variables: tuple[InputVariable, ...],
+        base_kernel_type: ReducedBaseKernel = "rbf",
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        self.p_kernel = gpytorch.kernels.LinearKernel()
+        active_dims = tuple(INPUT_VARIABLE_INDICES[variable] for variable in variables)
+        if base_kernel_type == "rbf":
+            self.base_kernel = gpytorch.kernels.RBFKernel(
+                ard_num_dims=len(variables), active_dims=active_dims
+            )
+        else:
+            self.base_kernel = gpytorch.kernels.LinearKernel(active_dims=active_dims)
 
     def forward(self, x1, x2, diag=False, **params):
-        p1 = x1[..., P_INDEX : P_INDEX + 1]
-        p2 = x2[..., P_INDEX : P_INDEX + 1]
-        cov_momentum = self.p_kernel(p1, p2, diag=diag, **params)
-
-        return cov_momentum
+        return self.base_kernel(x1, x2, diag=diag, **params)
 
 
 class StructuralDecoupledKernel(gpytorch.kernels.Kernel):
@@ -85,18 +98,8 @@ class StructuralDecoupledKernel(gpytorch.kernels.Kernel):
         q2 = x2[..., Q_INDEX : Q_INDEX + 1]
         z2 = x2[..., Z_INDEX : Z_INDEX + 1]
 
-        covariance_strain = self.strain_kernel(
-            q1,
-            q2,
-            diag=diag,
-            **params,
-        )
-        covariance_space = self.spatial_kernel(
-            z1,
-            z2,
-            diag=diag,
-            **params,
-        )
+        covariance_strain = self.strain_kernel(q1, q2, diag=diag, **params)
+        covariance_space = self.spatial_kernel(z1, z2, diag=diag, **params)
 
         return covariance_strain * covariance_space
 
@@ -240,10 +243,13 @@ def build_kernel(model_config: ModelConfig) -> gpytorch.kernels.Kernel:
     A single outer ScaleKernel is applied to every architecture so all models
     have a consistently learnable output scale.
     """
-    if model_config.kernel_type == "baseline":
+    if model_config.kernel_type == "rbf":
         base_kernel: gpytorch.kernels.Kernel = BaselineRBFKernel()
-    elif model_config.kernel_type == "P_only":
-        base_kernel = MomentumKernel()
+    elif model_config.kernel_type == "reduced_input":
+        base_kernel: gpytorch.kernels.Kernel = ReducedInputRBFKernel(
+            variables=model_config.reduced_input_variables,
+            base_kernel_type=model_config.reduced_input_base_kernel,
+        )
     elif model_config.kernel_type == "SD":
         base_kernel = StructuralDecoupledKernel(model_config)
     elif model_config.kernel_type == "warped":
