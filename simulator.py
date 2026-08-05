@@ -197,7 +197,7 @@ def build_stiffness_profile(
     elif profile == "piecewise":
         if config.num_hinges != 2:
             raise ValueError("The current piecewise profile requires num_hinges=2.")
-        stiffness = piecewise_stiffness(config.L, z_arr)
+        stiffness = piecewise_stiffness(config.L, z_arr, transition_width=0.2)
     elif profile == "sharp":
         stiffness = sharp_transition_stiffness(config.L, z_arr)
     else:

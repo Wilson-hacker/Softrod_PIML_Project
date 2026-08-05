@@ -323,7 +323,8 @@ class PipelineConfig:
     simulator: SimulatorConfig
     model: ModelConfig
     sampling: SamplingConfig
-    training: TrainingConfig = field(default_factory=TrainingConfig)
+    dEdp_training: TrainingConfig = field(default_factory=TrainingConfig)
+    dEdq_training: TrainingConfig = field(default_factory=TrainingConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
 
 
@@ -335,6 +336,8 @@ class ExperimentSpec:
     row_label: str
     simulator: SimulatorConfig
     sampling: SamplingConfig
+    dEdp_training: TrainingConfig
+    dEdq_training: TrainingConfig
     models: tuple[ModelConfig, ...]
     seeds: tuple[int, ...] = (6, 42, 79, 123, 456)
 

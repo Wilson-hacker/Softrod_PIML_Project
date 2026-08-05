@@ -208,7 +208,8 @@ def train_effort_models(
     pipeline_config: PipelineConfig,
     dataset: DatasetBundle,
 ) -> TrainedModels:
-    training_config = pipeline_config.training
+    dEdp_training_config = pipeline_config.dEdp_training
+    dEdq_training_config = pipeline_config.dEdq_training
 
     dEdp_config = ModelConfig(
         label=f"{pipeline_config.model.label}-dHdp",
@@ -224,14 +225,14 @@ def train_effort_models(
         train_x=dataset.X_train_norm,
         train_y=dataset.y_p_train_norm,
         model_config=dEdp_config,
-        training_config=training_config,
+        training_config=dEdp_training_config,
     )
 
     dEdq_model, dEdq_likelihood = train_gp_model(
         train_x=dataset.X_train_norm,
         train_y=dataset.y_q_train_norm,
         model_config=dEdq_config,
-        training_config=training_config,
+        training_config=dEdq_training_config,
     )
 
     models = TrainedModels(
@@ -268,6 +269,13 @@ def extract_learned_changepoint(
     if changepoint_kernel is None:
         return None
 
+    # tqdm.write(
+    #     f"Left lengthscale: {changepoint_kernel.left_kernel.lengthscale.detach().cpu().numpy()}"
+    # )
+    # tqdm.write(
+    #     f"Right lengthscale: {changepoint_kernel.right_kernel.lengthscale.detach().cpu().numpy()}"
+    # )
+
     location_normalized = changepoint_kernel.location
     width_normalized = changepoint_kernel.width
 
@@ -302,7 +310,7 @@ def run_pipeline(
             training_initial_condition=training_initial_condition,
             evaluation_initial_condition=evaluation_initial_condition,
         )
-    verbose = pipeline_config.training.verbose
+    verbose = pipeline_config.dEdq_training.verbose
 
     if verbose:
         print("\n" + "=" * 80)
@@ -349,7 +357,12 @@ def run_pipeline(
         seed=seed,
     )
 
-    if pipeline_config.training.verbose:
+    # tqdm.write(f"u rel. L2 error: {metrics['rollout']['u_rel_l2']:.3e}")
+    # tqdm.write(
+    #     f"Force RMSE: {metrics['calibration']['dHdq_force']['dHdq_force_rmse']:.3e}"
+    # )
+
+    if verbose:
         print_metrics_report(metrics)
 
     learned_changepoint = extract_learned_changepoint(
@@ -581,7 +594,8 @@ def build_artifact_profile(
     experiment: ExperimentSpec,
     model_results: Mapping[str, AggregateResult],
     simulation: SimulationBundle,
-    training_config: TrainingConfig,
+    dEdp_training_config: TrainingConfig,
+    dEdq_training_config: TrainingConfig,
     evaluation_config: EvaluationConfig,
 ) -> dict[str, Any]:
     simulator = simulation.simulator
@@ -617,7 +631,8 @@ def build_artifact_profile(
         "row_label": experiment.row_label,
         "simulator_config": (experiment.simulator.to_dict()),
         "sampling_config": (experiment.sampling.to_dict()),
-        "training_config": (training_config.to_dict()),
+        "dEdp_training_config": (dEdp_training_config.to_dict()),
+        "dEdq_training_config": (dEdq_training_config.to_dict()),
         "evaluation_config": (evaluation_config.to_dict()),
         "z": np.asarray(simulator.z),
         "dz": float(simulator.dz),
@@ -651,7 +666,6 @@ def save_experiment_artifact(
 def run_experiment_matrix(
     experiment_specs: Sequence[ExperimentSpec],
     save_results_path: str | Path,
-    training_config: TrainingConfig | None = None,
     evaluation_config: EvaluationConfig | None = None,
     parallel_config: ParallelConfig | None = None,
 ) -> dict[str, dict[str, AggregateResult]]:
@@ -661,7 +675,6 @@ def run_experiment_matrix(
     The artifact is updated after every completed profile, so plotting can be
     performed later without loading GP models or rerunning training.
     """
-    training_config = training_config or TrainingConfig()
     evaluation_config = evaluation_config or EvaluationConfig()
     parallel_config = parallel_config or ParallelConfig(enabled=False)
     results: dict[str, dict[str, AggregateResult]] = {}
@@ -684,13 +697,17 @@ def run_experiment_matrix(
             simulation = create_simulation_bundle(experiment.simulator)
             simulation_cache[cache_key] = simulation
 
+        dEdp_training_config = experiment.dEdp_training
+        dEdq_training_config = experiment.dEdq_training
+
         model_results: dict[str, AggregateResult] = {}
         for model in experiment.models:
             pipeline_config = PipelineConfig(
                 simulator=experiment.simulator,
                 model=model,
                 sampling=experiment.sampling,
-                training=training_config,
+                dEdp_training=dEdp_training_config,
+                dEdq_training=dEdq_training_config,
                 evaluation=evaluation_config,
             )
             model_results[model.label] = run_model_over_seeds(
@@ -706,7 +723,8 @@ def run_experiment_matrix(
             experiment=experiment,
             model_results=model_results,
             simulation=simulation,
-            training_config=training_config,
+            dEdp_training_config=dEdp_training_config,
+            dEdq_training_config=dEdq_training_config,
             evaluation_config=evaluation_config,
         )
         save_experiment_artifact(artifact, save_results_path)
@@ -728,6 +746,7 @@ def build_paper_experiments(
         kernel_type="SD",
         spatial_kernel="rbf",
     )
+    common_training_config = TrainingConfig()
     common_simulator = {"L": 10.0, "N": 100, "T": 5.5, "dt": 0.05, "profile_seed": 42}
     common_sampling = {
         "method": "stratified",
@@ -747,10 +766,10 @@ def build_paper_experiments(
                 stiffness_profile="constant",
                 num_hinges=4,
             ),
+            dEdp_training=common_training_config,
+            dEdq_training=common_training_config,
             sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
-            models=(
-                baseline,
-            ),
+            models=(baseline,),
             seeds=seeds,
         ),
         ExperimentSpec(
@@ -761,6 +780,8 @@ def build_paper_experiments(
                 stiffness_profile="periodic",
                 num_hinges=4,
             ),
+            dEdp_training=common_training_config,
+            dEdq_training=common_training_config,
             sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
             models=(
                 baseline,
@@ -781,6 +802,8 @@ def build_paper_experiments(
                 stiffness_profile="C2",
                 num_hinges=8,
             ),
+            dEdp_training=common_training_config,
+            dEdq_training=common_training_config,
             sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
             models=(
                 baseline,
@@ -801,6 +824,10 @@ def build_paper_experiments(
                 **common_simulator,
                 stiffness_profile="piecewise",
                 num_hinges=2,
+            ),
+            dEdp_training=common_training_config,
+            dEdq_training=TrainingConfig(
+                training_iter=1000, patience=50, min_delta=1.0e-4, learning_rate=0.01
             ),
             sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
             models=(
@@ -846,6 +873,10 @@ def changepoint_robostness_experiments(
                 stiffness_profile="piecewise",
                 num_hinges=2,
             ),
+            dEdp_training=TrainingConfig(),
+            dEdq_training=TrainingConfig(
+                training_iter=1000, patience=50, min_delta=1.0e-4, learning_rate=0.01
+            ),
             sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
             models=(
                 baseline,
@@ -854,49 +885,42 @@ def changepoint_robostness_experiments(
                     kernel_type="SD",
                     spatial_kernel="changepoint",
                     changepoint_location=5.0,
-                    changepoint_width=0.20,
+                    changepoint_width=0.2,
                 ),
                 ModelConfig(
-                    label="SD-ptb-W0.1",
+                    label="SD-ptb-P-",
+                    kernel_type="SD",
+                    spatial_kernel="changepoint",
+                    changepoint_location=4.8,
+                    changepoint_width=0.2,
+                ),
+                ModelConfig(
+                    label="SD-ptb-P+",
+                    kernel_type="SD",
+                    spatial_kernel="changepoint",
+                    changepoint_location=5.2,
+                    changepoint_width=0.2,
+                ),
+                ModelConfig(
+                    label="SD-ptb-W0.5-",
                     kernel_type="SD",
                     spatial_kernel="changepoint",
                     changepoint_location=5.0,
-                    changepoint_width=0.22,
+                    changepoint_width=0.1,
                 ),
                 ModelConfig(
-                    label="SD-ptb-W0.2",
+                    label="SD-ptb-W0.5+",
                     kernel_type="SD",
                     spatial_kernel="changepoint",
                     changepoint_location=5.0,
-                    changepoint_width=0.24,
+                    changepoint_width=0.3,
                 ),
                 ModelConfig(
-                    label="SD-ptb-W0.5",
+                    label="SD-ptb-WP",
                     kernel_type="SD",
                     spatial_kernel="changepoint",
-                    changepoint_location=5.0,
-                    changepoint_width=0.30,
-                ),
-                ModelConfig(
-                    label="SD-ptb-P0.1",
-                    kernel_type="SD",
-                    spatial_kernel="changepoint",
-                    changepoint_location=5.5,
-                    changepoint_width=0.20,
-                ),
-                ModelConfig(
-                    label="SD-ptb-P0.2",
-                    kernel_type="SD",
-                    spatial_kernel="changepoint",
-                    changepoint_location=6.0,
-                    changepoint_width=0.20,
-                ),
-                ModelConfig(
-                    label="SD-ptb-P0.5",
-                    kernel_type="SD",
-                    spatial_kernel="changepoint",
-                    changepoint_location=7.5,
-                    changepoint_width=0.20,
+                    changepoint_location=5.2,
+                    changepoint_width=0.3,
                 ),
             ),
             seeds=seeds,
@@ -917,7 +941,7 @@ def compute_main_experiment(
     )
 
     results = run_experiment_matrix(
-        experiment_specs=build_paper_experiments(),
+        experiment_specs=changepoint_robostness_experiments(),
         save_results_path=save_results_path,
         parallel_config=parallel_config,
     )
@@ -927,6 +951,4 @@ def compute_main_experiment(
 
 
 if __name__ == "__main__":
-    compute_main_experiment(
-        save_results_path="./data/paper_experiment_new.pkl"
-    )
+    compute_main_experiment(save_results_path="./data/changepoint_robustness_experiment.pkl")

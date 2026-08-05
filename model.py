@@ -136,6 +136,10 @@ def train_gp_model(
     model.eval()
     likelihood.eval()
 
+    # tqdm.write(
+    #     f"Restored best checkpoint from iteration {best_iteration + 1} "
+    #     f"with loss {best_loss:.6f}."
+    # )
     if training_config.verbose:
         print(
             f"Restored best checkpoint from iteration {best_iteration + 1} "
