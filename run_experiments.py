@@ -941,7 +941,7 @@ def compute_main_experiment(
     )
 
     results = run_experiment_matrix(
-        experiment_specs=changepoint_robostness_experiments(),
+        experiment_specs=build_paper_experiments(),
         save_results_path=save_results_path,
         parallel_config=parallel_config,
     )
@@ -951,4 +951,4 @@ def compute_main_experiment(
 
 
 if __name__ == "__main__":
-    compute_main_experiment(save_results_path="./data/changepoint_robustness_experiment.pkl")
+    compute_main_experiment(save_results_path="./data/paper_experiment_n100.pkl")

@@ -7,7 +7,8 @@ from typing import Any, Mapping, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 
-from config import ARTIFACT_SCHEMA_VERSION
+from config import ARTIFACT_SCHEMA_VERSION, ExperimentSpec
+from simulator import build_stiffness_profile
 
 
 def load_experiment_artifact(path: str | Path) -> dict[str, Any]:
@@ -134,7 +135,11 @@ def plot_multi_profile_rollout_grid_from_artifact(
 
     if legend_handles and legend_labels:
         figure.legend(
-            legend_handles, legend_labels, loc="lower center", ncol=len(legend_labels), frameon=True
+            legend_handles,
+            legend_labels,
+            loc="lower center",
+            ncol=len(legend_labels),
+            frameon=True,
         )
 
     figure.subplots_adjust(
@@ -241,3 +246,92 @@ def plot_force_field_error_heatmap_from_artifact(
 
     figure.tight_layout()
     _finalize_figure(figure, save_path)
+
+
+def plot_stiffness_profiles(
+    experiment_specs: Sequence[ExperimentSpec],
+    experiment_filter: Sequence[str] | None = None,
+    num_plot_points: int = 1000,
+    save_path: str | Path = "./plots/stiffness_profiles.pdf",
+) -> None:
+    """
+    Plot stiffness profiles on a dense spatial grid.
+
+    The dense plotting grid is independent of the simulator resolution used
+    in the actual experiments.
+
+    Parameters
+    ----------
+    experiment_specs:
+        Experiment specifications, e.g. the tuple returned by
+        build_paper_experiments().
+
+    experiment_filter:
+        Optional sequence of experiment names to include. The profiles are
+        plotted in the same order as they appear in experiment_specs.
+
+    num_plot_points:
+        Number of spatial points used only for plotting.
+
+    save_path:
+        Output path for the figure.
+    """
+    if num_plot_points < 2:
+        raise ValueError("num_plot_points must be at least 2.")
+
+    if experiment_filter is None:
+        selected_specs = list(experiment_specs)
+    else:
+        requested_names = set(experiment_filter)
+        available_names = {experiment.name for experiment in experiment_specs}
+        missing_names = requested_names - available_names
+
+        if missing_names:
+            raise ValueError(
+                "Unknown experiment names in experiment_filter: "
+                f"{sorted(missing_names)}."
+            )
+
+        selected_specs = [
+            experiment
+            for experiment in experiment_specs
+            if experiment.name in requested_names
+        ]
+
+    if not selected_specs:
+        raise ValueError("No stiffness profiles were selected for plotting.")
+
+    fig, axes = plt.subplots(
+        nrows=len(selected_specs),
+        ncols=1,
+        figsize=(7.0, 2.5 * len(selected_specs)),
+        sharex=True,
+        squeeze=False,
+    )
+
+    axes = axes[:, 0]
+
+    for axis, experiment in zip(
+        axes,
+        selected_specs,
+        strict=True,
+    ):
+        simulator_config = experiment.simulator
+        z_plot = np.linspace(0.0, simulator_config.L, num_plot_points)
+        stiffness = build_stiffness_profile(config=simulator_config, z_arr=z_plot)
+
+        axis.plot(z_plot, stiffness)
+
+        axis.set_ylabel(r"Stiffness $k(z)$")
+        axis.set_title(experiment.row_label)
+        axis.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel(r"$z$")
+    fig.tight_layout()
+
+    output_path = Path(save_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+
+    plt.close(fig)

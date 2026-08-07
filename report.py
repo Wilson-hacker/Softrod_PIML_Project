@@ -11,7 +11,9 @@ from config import (
 from plotting import (
     load_experiment_artifact,
     plot_multi_profile_rollout_grid_from_artifact,
+    plot_stiffness_profiles,
 )
+from run_experiments import build_paper_experiments
 
 
 def plot_main_experiment(
@@ -210,4 +212,9 @@ if __name__ == "__main__":
     result_path = "./data/paper_experiment_n100.pkl"
     results = load_aggregate_results_from_artifact(result_path)
     print_aggregate_table(results)
-    plot_main_experiment(data_path=result_path, save_path="./plots/rollout_n100.pdf")
+    # plot_main_experiment(data_path=result_path, save_path="./plots/rollout_n100.pdf")
+    plot_stiffness_profiles(
+        experiment_specs=build_paper_experiments(),
+        experiment_filter=["periodic", "C2", "piecewise"],
+        num_plot_points=500,
+    )
