@@ -772,7 +772,7 @@ def build_paper_experiments(
             ),
             dEdp_training=common_training_config,
             dEdq_training=common_training_config,
-            sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.02),
             models=(baseline,),
             seeds=seeds,
         ),
@@ -786,7 +786,7 @@ def build_paper_experiments(
             ),
             dEdp_training=common_training_config,
             dEdq_training=TrainingConfig(init_spatial_lengthscale=0.1),
-            sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.02),
             models=(
                 baseline,
                 sd_rbf,
@@ -804,11 +804,13 @@ def build_paper_experiments(
             simulator=SimulatorConfig(
                 **common_simulator,
                 stiffness_profile="C2",
-                num_hinges=8,
+                num_hinges=4,
             ),
             dEdp_training=common_training_config,
-            dEdq_training=common_training_config,
-            sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
+            dEdq_training=TrainingConfig(
+                training_iter=1000, patience=50, min_delta=1.0e-4, learning_rate=0.15
+            ),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.02),
             models=(
                 baseline,
                 sd_rbf,
@@ -833,7 +835,7 @@ def build_paper_experiments(
             dEdq_training=TrainingConfig(
                 training_iter=1000, patience=50, min_delta=1.0e-4, learning_rate=0.01
             ),
-            sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.02),
             models=(
                 baseline,
                 sd_rbf,

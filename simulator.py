@@ -281,7 +281,8 @@ class SoftRodSimulator:
         dp_dt += self.motor_force(t, self.z)
 
         # Boundary conditions (Fixed ends)
-        dq_dt[[0, -1]] = 0.0
+        dq_dt[0] = (grad_H_p[1] - grad_H_p[0]) / self.dz  # One-sided derivatives at boundaries
+        dq_dt[-1] = (grad_H_p[-1] - grad_H_p[-2]) / self.dz
         dp_dt[[0, -1]] = 0.0
 
         return np.concatenate([dp_dt, dq_dt])
