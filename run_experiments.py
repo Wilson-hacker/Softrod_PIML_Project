@@ -235,6 +235,10 @@ def train_effort_models(
         training_config=dEdq_training_config,
     )
 
+    # print("True lengthscale", dEdq_model.covar_module.base_kernel.base_kernel.lengthscale)
+    # print("True output scale", dEdq_model.covar_module.outputscale)
+    # print("True noise", dEdq_likelihood.noise_covar.noise)
+
     models = TrainedModels(
         dEdp_model=dEdp_model,
         dEdp_likelihood=dEdp_likelihood,
@@ -781,7 +785,7 @@ def build_paper_experiments(
                 num_hinges=4,
             ),
             dEdp_training=common_training_config,
-            dEdq_training=common_training_config,
+            dEdq_training=TrainingConfig(init_spatial_lengthscale=0.1),
             sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
             models=(
                 baseline,
@@ -952,3 +956,10 @@ def compute_main_experiment(
 
 if __name__ == "__main__":
     compute_main_experiment(save_results_path="./data/paper_experiment_n100.pkl")
+
+    # from plotting import plot_stiffness_profiles
+    # plot_stiffness_profiles(
+    #     experiment_specs=build_paper_experiments(),
+    #     experiment_filter=["periodic", "C2", "piecewise"],
+    #     num_plot_points=500,
+    # )

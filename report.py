@@ -1,6 +1,6 @@
 import pickle
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -9,11 +9,10 @@ from config import (
     AggregateResult,
 )
 from plotting import (
+    create_rollout_video_from_artifact,
     load_experiment_artifact,
     plot_multi_profile_rollout_grid_from_artifact,
-    plot_stiffness_profiles,
 )
-from run_experiments import build_paper_experiments
 
 
 def plot_main_experiment(
@@ -208,13 +207,116 @@ def load_aggregate_results_from_artifact(
     return results
 
 
+def check_right_boundary_momentum(
+    artifact_path: str | Path,
+    experiment_name: str,
+    model_filter: Sequence[str] | None = None,
+    tolerance: float = 1e-8,
+) -> None:
+    """
+    Check whether p(L, t) = 0 for the reference solution and GP rollouts.
+
+    Parameters
+    ----------
+    artifact_path:
+        Path to the saved .pkl artifact.
+
+    experiment_name:
+        Experiment to inspect, e.g. "periodic", "C2", or "piecewise".
+
+    model_filter:
+        Optional model labels to check. If None, check all models.
+
+    tolerance:
+        Maximum allowed absolute boundary value.
+    """
+    with Path(artifact_path).open("rb") as file:
+        artifact = pickle.load(file)
+
+    experiments = artifact["experiments"]
+
+    if experiment_name not in experiments:
+        raise KeyError(
+            f"Unknown experiment {experiment_name!r}."
+        )
+
+    profile = experiments[experiment_name]
+
+    p_reference = np.asarray(
+        profile["p_reference"],
+        dtype=float,
+    )
+
+    if p_reference.ndim != 2:
+        raise ValueError(
+            "p_reference must have shape (N_z, N_t)."
+        )
+
+    p_reference_right = p_reference[-1, :]
+    reference_max_error = np.max(
+        np.abs(p_reference_right)
+    )
+
+    print(
+        f"Experiment: {experiment_name}"
+    )
+    print(
+        "Reference: "
+        f"max |p(L,t)| = {reference_max_error:.3e} "
+        f"-> {'PASS' if reference_max_error <= tolerance else 'FAIL'}"
+    )
+
+    models = profile["models"]
+
+    if model_filter is None:
+        model_labels = list(models.keys())
+    else:
+        missing = set(model_filter) - set(
+            models.keys()
+        )
+
+        if missing:
+            raise KeyError(
+                f"Unknown model labels: {sorted(missing)}"
+            )
+
+        model_labels = list(model_filter)
+
+    for model_label in model_labels:
+        p_gp = np.asarray(
+            models[model_label]["p_gp_mean"],
+            dtype=float,
+        )
+
+        if p_gp.shape != p_reference.shape:
+            raise ValueError(
+                f"{model_label!r} p_gp_mean has shape "
+                f"{p_gp.shape}, expected {p_reference.shape}."
+            )
+
+        p_gp_right = p_gp[-1, :]
+        model_max_error = np.max(
+            np.abs(p_gp_right)
+        )
+
+        print(
+            f"{model_label}: "
+            f"max |p(L,t)| = {model_max_error:.3e} "
+            f"-> {'PASS' if model_max_error <= tolerance else 'FAIL'}"
+        )
+
+
 if __name__ == "__main__":
     result_path = "./data/paper_experiment_n100.pkl"
     results = load_aggregate_results_from_artifact(result_path)
     print_aggregate_table(results)
-    # plot_main_experiment(data_path=result_path, save_path="./plots/rollout_n100.pdf")
-    plot_stiffness_profiles(
-        experiment_specs=build_paper_experiments(),
-        experiment_filter=["periodic", "C2", "piecewise"],
-        num_plot_points=500,
+    # check_right_boundary_momentum(artifact_path=result_path, experiment_name="piecewise")
+    create_rollout_video_from_artifact(
+        artifact_path=result_path,
+        experiment_name="piecewise",
+        model_label="Baseline",
+        save_path="./plots/piecewise_baseline2.mp4",
+        frame_stride=1,
+        fps=20,
     )
+    # plot_main_experiment(data_path=result_path, save_path="./plots/rollout_n100.pdf")

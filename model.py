@@ -8,7 +8,7 @@ import gpytorch
 import torch
 
 from config import ModelConfig, TrainingConfig
-from kernels import build_kernel
+from kernels import StructuralDecoupledKernel, build_kernel
 
 
 class EnergyGradientGP(gpytorch.models.ExactGP):
@@ -60,6 +60,18 @@ def train_gp_model(
 
     model.train()
     likelihood.train()
+
+    structural_kernel = model.covar_module.base_kernel
+    if (
+        training_config.init_spatial_lengthscale is not None
+        and isinstance(structural_kernel, StructuralDecoupledKernel)
+        and isinstance(structural_kernel.spatial_kernel, gpytorch.kernels.RBFKernel)
+    ):
+        model.covar_module.base_kernel.spatial_kernel.lengthscale = torch.as_tensor(
+            [[training_config.init_spatial_lengthscale]],
+            dtype=train_x.dtype,
+            device=train_x.device,
+        )
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -132,6 +144,30 @@ def train_gp_model(
     # the maximum iteration count.
     model.load_state_dict(best_model_state)
     likelihood.load_state_dict(best_likelihood_state)
+
+    # kernel = model.covar_module.base_kernel.base_kernel
+    # print(
+    #     "Before:",
+    #     kernel.lengthscale.detach().cpu(),
+    # )
+    # new_lengthscale = kernel.lengthscale.detach().clone()
+    # new_lengthscale[..., 0] = 100.0
+    # kernel.lengthscale = new_lengthscale
+    # print(
+    #     "After:",
+    #     kernel.lengthscale.detach().cpu(),
+    # )
+    #
+    # with torch.no_grad():
+    #     output = model(train_x)
+    #     forced_p_loss = -marginal_log_likelihood(
+    #         output,
+    #         train_y,
+    #     )
+    # print(
+    #     "Loss with large p lengthscale:",
+    #     forced_p_loss.item(),
+    # )
 
     model.eval()
     likelihood.eval()

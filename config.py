@@ -207,6 +207,7 @@ class TrainingConfig:
     learning_rate: float = 0.1
     log_interval: int = 20
     verbose: bool = False
+    init_spatial_lengthscale: float | None = None
 
     def __post_init__(self) -> None:
         if self.training_iter <= 0:
@@ -228,6 +229,7 @@ class TrainingConfig:
             "learning_rate": self.learning_rate,
             "log_interval": self.log_interval,
             "verbose": self.verbose,
+            "init_spatial_lengthscale": self.init_spatial_lengthscale,
         }
 
 

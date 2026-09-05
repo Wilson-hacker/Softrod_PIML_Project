@@ -6,6 +6,7 @@ from typing import Any, Mapping, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 
 from config import ARTIFACT_SCHEMA_VERSION, ExperimentSpec
 from simulator import build_stiffness_profile
@@ -335,3 +336,252 @@ def plot_stiffness_profiles(
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
 
     plt.close(fig)
+
+
+def create_rollout_video_from_artifact(
+    artifact_path: str | Path,
+    experiment_name: str,
+    model_label: str,
+    save_path: str | Path,
+    frame_stride: int = 1,
+    fps: int = 20,
+    figsize: tuple[float, float] = (8.0, 6.0),
+) -> None:
+    """
+    Generate a rollout animation from a saved experiment artifact.
+
+    The upper panel compares the numerical displacement with the GP rollout.
+    The lower panel shows the pointwise displacement prediction error.
+
+    Parameters
+    ----------
+    artifact_path:
+        Path to the saved .pkl artifact.
+
+    experiment_name:
+        Experiment to visualize, e.g. "periodic", "C2", or "piecewise".
+
+    model_label:
+        Model to visualize, e.g. "Baseline", "SD-RBF", or "SD-matched".
+
+    save_path:
+        Output video path. Supported extensions are .mp4 and .gif.
+
+    frame_stride:
+        Use every `frame_stride`-th time step in the animation.
+
+    fps:
+        Frames per second of the saved animation.
+
+    figsize:
+        Matplotlib figure size.
+    """
+    artifact_path = Path(artifact_path)
+    save_path = Path(save_path)
+
+    if frame_stride <= 0:
+        raise ValueError("frame_stride must be positive.")
+    if fps <= 0:
+        raise ValueError("fps must be positive.")
+
+    with artifact_path.open("rb") as file:
+        artifact: Mapping[str, Any] = pickle.load(file)
+
+    experiments = artifact["experiments"]
+
+    if experiment_name not in experiments:
+        raise KeyError(
+            f"Unknown experiment {experiment_name!r}. "
+            f"Available experiments: {list(experiments.keys())}"
+        )
+
+    profile = experiments[experiment_name]
+
+    models = profile["models"]
+    if model_label not in models:
+        raise KeyError(
+            f"Unknown model {model_label!r} for experiment "
+            f"{experiment_name!r}. "
+            f"Available models: {list(models.keys())}"
+        )
+
+    z = np.asarray(profile["z"], dtype=float)
+    t = np.asarray(profile["t"], dtype=float)
+
+    u_reference = np.asarray(profile["u_reference"], dtype=float)
+    u_prediction = np.asarray(models[model_label]["u_gp_mean"], dtype=float)
+
+    q_reference = np.asarray(profile["q_reference"], dtype=float)
+    q_prediction = np.asarray(models[model_label]["q_gp_mean"], dtype=float)
+
+    if u_reference.shape != u_prediction.shape:
+        raise ValueError(
+            "Reference and predicted displacements must have "
+            f"the same shape, but received "
+            f"{u_reference.shape} and {u_prediction.shape}."
+        )
+
+    if q_reference.shape != q_prediction.shape:
+        raise ValueError(
+            "Reference and predicted strains must have "
+            f"the same shape, but received "
+            f"{q_reference.shape} and {q_prediction.shape}."
+        )
+
+    if q_reference.shape != u_reference.shape:
+        raise ValueError(
+            "Strain and displacement arrays must share the same space-time grid."
+        )
+
+    if u_reference.shape[0] != z.size:
+        raise ValueError("Spatial dimension of displacement does not match z.")
+
+    if u_reference.shape[1] != t.size:
+        raise ValueError("Temporal dimension of displacement does not match t.")
+
+    # error = u_prediction - u_reference
+    q_error = q_prediction - q_reference
+
+    frame_indices = np.arange(0, t.size, frame_stride, dtype=int)
+
+    #
+    # Fixed axis limits prevent the axes from jumping between frames.
+    #
+    displacement_min = min(float(np.min(u_reference)), float(np.min(u_prediction)))
+    displacement_max = max(float(np.max(u_reference)), float(np.max(u_prediction)))
+
+    displacement_range = displacement_max - displacement_min
+    displacement_margin = max(0.05 * displacement_range, 1e-8)
+
+    max_abs_error = float(np.max(np.abs(q_error)))
+
+    if max_abs_error == 0.0:
+        max_abs_error = 1e-8
+
+    figure, (rollout_axis, error_axis) = plt.subplots(
+        2, 1, figsize=figsize, sharex=True, gridspec_kw={"height_ratios": (2.0, 1.0)}
+    )
+
+    figure_title = figure.suptitle("", fontsize="large", y=0.97)
+
+    #
+    # Rollout panel
+    #
+    (reference_line,) = rollout_axis.plot(
+        z, u_reference[:, 0], label="Numerical solution"
+    )
+
+    (prediction_line,) = rollout_axis.plot(
+        z, u_prediction[:, 0], linestyle="--", label=model_label
+    )
+
+    rollout_axis.set_ylabel(r"$u(z,t)$")
+    rollout_axis.set_ylim(
+        displacement_min - displacement_margin, displacement_max + displacement_margin
+    )
+
+    rollout_axis.grid(True, linestyle=":", alpha=0.45)
+
+    rollout_axis.legend()
+
+    #
+    # Error panel
+    #
+    (q_error_line,) = error_axis.plot(z, q_error[:, 0])
+
+    error_axis.axhline(0.0, linewidth=1.0, linestyle=":")
+
+    error_axis.set_xlabel(r"$z$")
+    error_axis.set_ylabel(r"$\hat{q}-q$")
+
+    error_axis.set_ylim(-1.05 * max_abs_error, 1.05 * max_abs_error)
+
+    error_axis.grid(True, linestyle=":", alpha=0.45)
+
+    error_title = error_axis.set_title("", fontsize="medium")
+
+    def update(frame_number: int):
+        step = frame_indices[frame_number]
+
+        #
+        # Displacement rollout
+        #
+        reference_u = u_reference[:, step]
+        prediction_u = u_prediction[:, step]
+
+        reference_line.set_ydata(reference_u)
+
+        prediction_line.set_ydata(prediction_u)
+
+        #
+        # Strain prediction error
+        #
+        reference_q = q_reference[:, step]
+        prediction_q = q_prediction[:, step]
+
+        strain_error = prediction_q - reference_q
+
+        q_error_line.set_ydata(strain_error)
+
+        #
+        # Figure title
+        #
+        figure_title.set_text(
+            f"{profile['row_label']} — "
+            f"{model_label} — "
+            rf"$t={t[step]:.2f}$"
+        )
+
+        #
+        # Instantaneous relative q error
+        #
+        q_reference_norm = np.linalg.norm(reference_q)
+
+        if q_reference_norm > 1e-12:
+            q_relative_l2_error = np.linalg.norm(strain_error) / q_reference_norm
+
+            error_title.set_text(
+                r"Strain prediction error: "
+                rf"$\varepsilon_q(t)"
+                rf"={q_relative_l2_error:.3e}$"
+            )
+        else:
+            error_title.set_text(
+                r"Strain prediction error: "
+                r"$\varepsilon_q(t)$ undefined"
+            )
+
+        return (
+            reference_line,
+            prediction_line,
+            q_error_line,
+            figure_title,
+            error_title,
+        )
+
+    animation = FuncAnimation(
+        figure, update, frames=len(frame_indices), interval=1000 / fps, blit=False
+    )
+
+    figure.subplots_adjust(
+        left=0.12,
+        right=0.97,
+        bottom=0.10,
+        top=0.90,
+        hspace=0.32,
+    )
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    suffix = save_path.suffix.lower()
+
+    if suffix == ".mp4":
+        writer = FFMpegWriter(fps=fps, bitrate=3000)
+    elif suffix == ".gif":
+        writer = PillowWriter(fps=fps)
+    else:
+        raise ValueError("save_path must end in .mp4 or .gif.")
+
+    animation.save(save_path, writer=writer, dpi=150)
+
+    plt.close(figure)
