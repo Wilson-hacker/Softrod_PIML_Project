@@ -757,7 +757,7 @@ def build_paper_experiments(
         "left_region": (0.0, 2.0),
         "middle_region": (2.0, 8.0),
         "right_region": (8.0, 10.0),
-        "weights": (0.35, 0.30, 0.35),
+        "weights": (0.25, 0.50, 0.25),
         "include_domain_boundaries": True,
     }
 
@@ -785,7 +785,7 @@ def build_paper_experiments(
                 num_hinges=4,
             ),
             dEdp_training=common_training_config,
-            dEdq_training=TrainingConfig(init_spatial_lengthscale=0.1),
+            dEdq_training=common_training_config,
             sampling=SamplingConfig(**common_sampling, train_fraction=0.02),
             models=(
                 baseline,
@@ -808,7 +808,7 @@ def build_paper_experiments(
             ),
             dEdp_training=common_training_config,
             dEdq_training=TrainingConfig(
-                training_iter=1000, patience=50, min_delta=1.0e-4, learning_rate=0.15
+                training_iter=1000, patience=50, min_delta=1.0e-4, learning_rate=0.02
             ),
             sampling=SamplingConfig(**common_sampling, train_fraction=0.02),
             models=(
@@ -866,7 +866,7 @@ def changepoint_robostness_experiments(
         "left_region": (0.0, 2.0),
         "middle_region": (2.0, 8.0),
         "right_region": (8.0, 10.0),
-        "weights": (0.35, 0.30, 0.35),
+        "weights": (0.25, 0.50, 0.25),
         "include_domain_boundaries": True,
     }
 
@@ -883,7 +883,7 @@ def changepoint_robostness_experiments(
             dEdq_training=TrainingConfig(
                 training_iter=1000, patience=50, min_delta=1.0e-4, learning_rate=0.01
             ),
-            sampling=SamplingConfig(**common_sampling, train_fraction=0.04),
+            sampling=SamplingConfig(**common_sampling, train_fraction=0.02),
             models=(
                 baseline,
                 ModelConfig(
@@ -957,7 +957,9 @@ def compute_main_experiment(
 
 
 if __name__ == "__main__":
-    compute_main_experiment(save_results_path="./data/paper_experiment_n100.pkl")
+    compute_main_experiment(save_results_path="./data/paper_experiment.pkl")
+
+    # Uncomment if want to plot stiffness profiles.
 
     # from plotting import plot_stiffness_profiles
     # plot_stiffness_profiles(

@@ -321,13 +321,13 @@ def plot_stiffness_profiles(
         z_plot = np.linspace(0.0, simulator_config.L, num_plot_points)
         stiffness = build_stiffness_profile(config=simulator_config, z_arr=z_plot)
 
-        axis.plot(z_plot, stiffness)
+        axis.plot(z_plot, stiffness, lw=2.0)
 
-        axis.set_ylabel(r"Stiffness $k(z)$")
-        axis.set_title(experiment.row_label)
+        axis.set_ylabel(r"Stiffness $k(z)$", fontsize=10)
+        axis.set_title(experiment.row_label, fontsize=13)
         axis.grid(True, alpha=0.3)
 
-    axes[-1].set_xlabel(r"$z$")
+    axes[-1].set_xlabel(r"Spatial $z$", fontsize=10)
     fig.tight_layout()
 
     output_path = Path(save_path)
@@ -444,9 +444,7 @@ def create_rollout_video_from_artifact(
 
     frame_indices = np.arange(0, t.size, frame_stride, dtype=int)
 
-    #
     # Fixed axis limits prevent the axes from jumping between frames.
-    #
     displacement_min = min(float(np.min(u_reference)), float(np.min(u_prediction)))
     displacement_max = max(float(np.max(u_reference)), float(np.max(u_prediction)))
 
@@ -464,9 +462,7 @@ def create_rollout_video_from_artifact(
 
     figure_title = figure.suptitle("", fontsize="large", y=0.97)
 
-    #
     # Rollout panel
-    #
     (reference_line,) = rollout_axis.plot(
         z, u_reference[:, 0], label="Numerical solution"
     )
@@ -484,9 +480,7 @@ def create_rollout_video_from_artifact(
 
     rollout_axis.legend()
 
-    #
     # Error panel
-    #
     (q_error_line,) = error_axis.plot(z, q_error[:, 0])
 
     error_axis.axhline(0.0, linewidth=1.0, linestyle=":")
@@ -503,9 +497,7 @@ def create_rollout_video_from_artifact(
     def update(frame_number: int):
         step = frame_indices[frame_number]
 
-        #
         # Displacement rollout
-        #
         reference_u = u_reference[:, step]
         prediction_u = u_prediction[:, step]
 
@@ -513,9 +505,7 @@ def create_rollout_video_from_artifact(
 
         prediction_line.set_ydata(prediction_u)
 
-        #
         # Strain prediction error
-        #
         reference_q = q_reference[:, step]
         prediction_q = q_prediction[:, step]
 
@@ -523,18 +513,14 @@ def create_rollout_video_from_artifact(
 
         q_error_line.set_ydata(strain_error)
 
-        #
         # Figure title
-        #
         figure_title.set_text(
             f"{profile['row_label']} — "
             f"{model_label} — "
             rf"$t={t[step]:.2f}$"
         )
 
-        #
         # Instantaneous relative q error
-        #
         q_reference_norm = np.linalg.norm(reference_q)
 
         if q_reference_norm > 1e-12:

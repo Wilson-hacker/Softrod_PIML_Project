@@ -244,35 +244,10 @@ New experiments can be added by:
 
 ## Paper
 
-**[Paper Title]**
+- Title: **Structure-Aware Spatial Kernels for Gaussian Process Distributed Port-Hamiltonian Systems**
+- Authors: Tianyi Yang, Thomas Beckers, Mohammad Ali, Kaiyuan Tan
 
-[Author 1], [Author 2], [Author 3]
-
-[Journal, conference, or preprint information]
-
-[Paper URL or DOI]
-
-## Citation
-
-Please cite the accompanying paper if you use this code:
-
-```bibtex
-@article{placeholder_key,
-  title   = {[Paper Title]},
-  author  = {[Authors]},
-  journal = {[Journal or Conference]},
-  year    = {[Year]},
-  doi     = {[DOI]}
-}
-```
-
-Update this entry with the final publication information before release.
-
-## License
-
-This project is released under the **[License Name]** license.
-
-Add the corresponding `LICENSE` file before making the repository public.
+To be submitted on ACC.
 
 ## Contact
 
