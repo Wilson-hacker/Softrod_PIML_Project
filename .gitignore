@@ -6,6 +6,7 @@ plots/
 data/
 test.py
 diagnostic.py
+utils.py
 *.csv
 
 # Ignore saved PyTorch model weights

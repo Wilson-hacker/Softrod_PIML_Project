@@ -112,6 +112,10 @@ automatically. Generated results and figures are excluded from Git.
 If you use this code in your research, please cite the accompanying manuscript.
 The arXiv link and citation details will be added when the preprint is available.
 
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
 ## Contact
 
 [Tianyi Yang](mailto:tianyi.yang@vanderbilt.edu), Vanderbilt University.
