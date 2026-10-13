@@ -63,7 +63,7 @@ from simulator import SoftRodSimulator
 
 
 def default_initial_q(z: np.ndarray, length: float) -> np.ndarray:
-    """Initial strain profile used in the paper experiments."""
+    """Return the initial strain profile for the paper experiments."""
     center = length / 2.0
     return -4.0 * (z - center) * np.exp(-((z - center) ** 2))
 
@@ -71,6 +71,7 @@ def default_initial_q(z: np.ndarray, length: float) -> np.ndarray:
 def print_changepoint_summary(
     result: AggregateResult,
 ) -> None:
+    """Print learned changepoint means and standard deviations across seeds."""
     mean = result.changepoint_mean
     standard_deviation = result.changepoint_std
 
@@ -99,18 +100,13 @@ def print_changepoint_summary(
 def initialize_seed_worker(
     torch_threads: int,
 ) -> None:
-    """
-    Configure CPU threading inside one worker process.
-
-    Each process trains an independent model, so unrestricted Torch
-    threading can otherwise oversubscribe the available CPU cores.
-    """
+    """Limit Torch threads per worker to avoid CPU oversubscription."""
     torch.set_num_threads(torch_threads)
 
     try:
         torch.set_num_interop_threads(1)
     except RuntimeError:
-        # PyTorch permits setting this only before inter-op work starts.
+        # Inter-op threads can only be set before parallel work starts.
         pass
 
 
@@ -118,9 +114,7 @@ def resolve_parallel_resources(
     parallel_config: ParallelConfig,
     number_of_jobs: int,
 ) -> tuple[int, int]:
-    """
-    Determine the number of processes and Torch threads per process.
-    """
+    """Choose the worker count and Torch threads per worker."""
     available_cpus = os.cpu_count() or 1
 
     if parallel_config.max_workers is None:
@@ -153,7 +147,7 @@ def create_simulation_bundle(
     training_initial_condition: InitialCondition = default_initial_q,
     evaluation_initial_condition: InitialCondition | None = None,
 ) -> SimulationBundle:
-    """Generate deterministic reference trajectories once per simulator setup."""
+    """Generate reference trajectories for training and evaluation."""
     simulator = SoftRodSimulator(config)
     training_data = simulator.generate_dataset(training_initial_condition)
     evaluation_data = (
@@ -173,7 +167,7 @@ def get_training_dataset(
     sampling_config: SamplingConfig,
     seed: int,
 ) -> DatasetBundle:
-    """Prepare one seed's exact training set, held-out set, and targets."""
+    """Prepare the training and held-out data for one seed."""
     return prepare_training_dataset(
         reference_data=simulation.training_data,
         sampling_config=sampling_config,
@@ -185,6 +179,7 @@ def resolve_model_config(
     model_config: ModelConfig,
     dataset: DatasetBundle,
 ) -> ModelConfig:
+    """Normalize spatial changepoint parameters when the model uses them."""
     if not (
         model_config.kernel_type == "SD"
         and model_config.spatial_kernel == "changepoint"
@@ -208,6 +203,7 @@ def train_effort_models(
     pipeline_config: PipelineConfig,
     dataset: DatasetBundle,
 ) -> TrainedModels:
+    """Train both effort GPs and attach their normalization statistics."""
     dEdp_training_config = pipeline_config.dEdp_training
     dEdq_training_config = pipeline_config.dEdq_training
 
@@ -216,7 +212,7 @@ def train_effort_models(
         kernel_type="rbf",
     )
 
-    # Uncomment to use the reduced input dHdp model
+    # Alternative: use a linear kernel on p for dH/dp.
     # dEdp_config = ModelConfig(
     #     label=f"{pipeline_config.model.label}-dHdp",
     #     kernel_type="reduced_input",
@@ -262,11 +258,7 @@ def extract_learned_changepoint(
     dEdq_model: Any,
     z_index: int = Z_INDEX,
 ) -> ChangepointEstimate | None:
-    """
-    Extract the learned changepoint center and width in physical units.
-
-    This assumes that the changepoint kernel acts on normalized z.
-    """
+    """Convert learned changepoint parameters from normalized z to physical units."""
     structural_kernel = dEdq_model.covar_module.base_kernel
     changepoint_kernel = None
     if isinstance(structural_kernel, StructuralDecoupledKernel) and isinstance(
@@ -302,7 +294,7 @@ def run_pipeline(
     training_initial_condition: InitialCondition = default_initial_q,
     evaluation_initial_condition: InitialCondition | None = None,
 ) -> RunResult:
-    """Compute one model/seed result. This function never creates plots."""
+    """Train and evaluate one model for one seed."""
     seed_everything(seed)
 
     if simulation is None:
@@ -381,13 +373,7 @@ def run_pipeline(
 
 
 def run_seed_worker(job: SeedJob) -> RunResult:
-    """
-    Execute one independent seed.
-
-    The simulator object is reconstructed inside the process instead of
-    being transferred between processes. The precomputed reference arrays
-    are reused, so the reference PDE does not need to be solved again.
-    """
+    """Run one seed with a local simulator and precomputed reference data."""
     simulator = SoftRodSimulator(job.pipeline_config.simulator)
 
     simulation = SimulationBundle(
@@ -409,12 +395,7 @@ def run_model_over_seeds(
     simulation: SimulationBundle | None = None,
     parallel_config: ParallelConfig | None = None,
 ) -> AggregateResult:
-    """
-    Compute one model configuration over several random seeds.
-
-    Seed jobs are executed sequentially when parallel execution is disabled
-    and in separate processes otherwise.
-    """
+    """Evaluate one model across seeds, sequentially or in worker processes."""
     if not seeds:
         raise ValueError("At least one seed must be provided.")
 
@@ -425,7 +406,6 @@ def run_model_over_seeds(
 
     progress_description = f"{pipeline_config.model.label} seeds"
 
-    # Sequential execution.
     if not parallel_config.enabled or len(seeds) == 1:
         runs = tuple(
             run_pipeline(
@@ -565,7 +545,7 @@ def aggregate_to_artifact_model(
     aggregate: AggregateResult,
     evaluation_config: EvaluationConfig,
 ) -> dict[str, Any]:
-    """Strip nonportable GP objects from an aggregate result."""
+    """Serialize aggregate metrics, rollout statistics, and diagnostic curves."""
     return {
         "model_label": aggregate.model_label,
         "model_config": aggregate.runs[0].pipeline_config.model.to_dict(),
@@ -594,6 +574,7 @@ def build_artifact_profile(
     dEdq_training_config: TrainingConfig,
     evaluation_config: EvaluationConfig,
 ) -> dict[str, Any]:
+    """Package reference data, model results, and settings for one profile."""
     simulator = simulation.simulator
     evaluation_data = simulation.evaluation_data
 
@@ -648,7 +629,7 @@ def save_experiment_artifact(
     artifact: Mapping[str, Any],
     save_path: str | Path,
 ) -> None:
-    """Atomically save a model-free computation artifact."""
+    """Save the experiment artifact using an atomic file replacement."""
     path = Path(save_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_suffix(path.suffix + ".tmp")
@@ -665,11 +646,9 @@ def run_experiment_matrix(
     evaluation_config: EvaluationConfig | None = None,
     parallel_config: ParallelConfig | None = None,
 ) -> dict[str, dict[str, AggregateResult]]:
-    """
-    Compute a profile/model/seed matrix and save plotting-ready data.
+    """Run all profile, model, and seed combinations.
 
-    The artifact is updated after every completed profile, so plotting can be
-    performed later without loading GP models or rerunning training.
+    Save results after each profile for reporting without retraining.
     """
     evaluation_config = evaluation_config or EvaluationConfig()
     parallel_config = parallel_config or ParallelConfig(enabled=False)
@@ -732,6 +711,7 @@ def run_experiment_matrix(
 def build_paper_experiments(
     seeds: tuple[int, ...] = (6, 42, 79, 123, 456),
 ) -> tuple[ExperimentSpec, ...]:
+    """Define the stiffness profiles and model comparisons for the paper."""
     baseline = ModelConfig(
         label="Baseline",
         kernel_type="rbf",
@@ -847,6 +827,7 @@ def build_paper_experiments(
 def changepoint_robostness_experiments(
     seeds: tuple[int, ...] = (6, 42, 79, 123, 456),
 ) -> tuple[ExperimentSpec, ...]:
+    """Define experiments with perturbed changepoint initialization."""
     baseline = ModelConfig(
         label="Baseline",
         kernel_type="rbf",
@@ -930,7 +911,7 @@ def compute_main_experiment(
     save_results_path: str | Path = "./data/paper_experiment.pkl",
     parallel_config: ParallelConfig | None = None,
 ) -> dict[str, dict[str, AggregateResult]]:
-    """Run the paper experiment and save data required for later plots."""
+    """Run the paper experiments and save results for reporting."""
     parallel_config = parallel_config or ParallelConfig(
         enabled=True,
         max_workers=5,
@@ -951,7 +932,7 @@ def compute_main_experiment(
 if __name__ == "__main__":
     compute_main_experiment(save_results_path="./data/paper_experiment.pkl")
 
-    # Uncomment if want to plot stiffness profiles.
+    # Uncomment to plot the stiffness profiles.
 
     # from plotting import plot_stiffness_profiles
     # plot_stiffness_profiles(

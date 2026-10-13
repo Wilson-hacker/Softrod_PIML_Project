@@ -18,36 +18,12 @@ def stratified_z_indices(
     include_domain_boundaries=True,
     shuffle=True,
 ):
-    """
-    Returns stratified training indices based on spatial coordinate z.
+    """Sample training indices by spatial region without replacement.
 
-    Sampling allocation:
-        30% from left region:   0 <= z < 2
-        40% from middle region: 2 <= z < 8
-        30% from right region:  8 <= z <= 10
-
-    Args:
-        X:
-            Input array of shape [N_samples, 3], where X[:, z_col] is z.
-        train_fraction:
-            Fraction of the full dataset to sample.
-        seed:
-            Random seed.
-        z_col:
-            Column index of z in X.
-        left_region, middle_region, right_region:
-            Spatial intervals.
-        weights:
-            Sampling fractions for left, middle, right regions.
-        include_domain_boundaries:
-            If True, include z=0 and z=10 in left/right regions.
-            If False, strictly use 0 < z < 2 and 8 < z < 10.
-        shuffle:
-            Whether to shuffle the final returned index array.
-
-    Returns:
-        train_idx:
-            Array of selected training indices.
+    X has shape (N_samples, 3), with z in column z_col. The default weights
+    allocate 30%, 40%, and 30% of samples to the left, middle, and right
+    regions. Include outer endpoints when include_domain_boundaries is True.
+    Fill shortages from unselected points and optionally shuffle the result.
     """
     rng = np.random.default_rng(seed)
 
@@ -79,6 +55,7 @@ def stratified_z_indices(
     right_idx_pool = np.where(right_mask)[0]
 
     def sample_from_pool(pool, n):
+        """Sample up to n available indices without replacement."""
         if len(pool) == 0:
             return np.array([], dtype=int)
         n = min(n, len(pool))
@@ -90,8 +67,7 @@ def stratified_z_indices(
 
     train_idx = np.concatenate([left_idx, middle_idx, right_idx])
 
-    # If some region did not have enough points, fill the remaining budget
-    # from points not already selected.
+    # Fill regional shortages with unselected points.
     if len(train_idx) < num_train:
         selected_mask = np.zeros(num_total, dtype=bool)
         selected_mask[train_idx] = True
@@ -114,6 +90,7 @@ def stratified_z_indices(
 
 
 def random_z_indices(X, train_fraction, seed):
+    """Sample training indices uniformly without replacement."""
     num_train = int(X.shape[0] * train_fraction)
     rng = np.random.default_rng(seed=seed)
     return rng.choice(X.shape[0], size=num_train, replace=False)
@@ -126,14 +103,7 @@ def normalize_changepoint_params(
     X_std,
     z_col=2,
 ):
-    """
-    Convert physical changepoint location/width into normalized coordinates.
-
-    The GP kernel receives normalized inputs:
-        z_norm = (z_phys - z_mean) / z_std
-
-    So the changepoint parameters must also be expressed in normalized units.
-    """
+    """Convert physical changepoint parameters to normalized z coordinates."""
     z_mean = float(X_mean[z_col].detach().cpu().item())
     z_std = float(X_std[z_col].detach().cpu().item()) + 1e-6
 
@@ -144,6 +114,7 @@ def normalize_changepoint_params(
 
 
 def simulate_gp_phs(simulator, dEdp_model, dEdq_model, get_init_q_config):
+    """Integrate the dynamics using learned Hamiltonian gradients."""
     print("Executing GP-PHS trajectory rollout simulation...")
     q0 = get_init_q_config(simulator.z, simulator.L)
     p0 = np.zeros(simulator.N)
@@ -153,20 +124,21 @@ def simulate_gp_phs(simulator, dEdp_model, dEdq_model, get_init_q_config):
     dEdq_model.eval()
 
     def gp_pde_rhs(t, state):
+        """Evaluate the dynamics using GP-predicted effort fields."""
         p = state[:simulator.N]
         q = state[simulator.N:]
 
-        # NEW: Include simulator.z in the evaluation tensor
+        # Include spatial coordinates in the GP inputs.
         X_raw = torch.tensor(np.stack([p, q, simulator.z], axis=1), dtype=torch.float64)
 
-        # Normalize inputs before passing to GP
+        # Normalize the GP inputs.
         X_norm = (X_raw - dEdp_model.X_mean) / (dEdp_model.X_std + 1e-6)
 
         with torch.no_grad():
             pred_p_norm = dEdp_model(X_norm).mean.numpy()
             pred_q_norm = dEdq_model(X_norm).mean.numpy()
 
-        # Un-normalize outputs back into physical parameter scales
+        # Convert predictions to physical units.
         grad_H_p = pred_p_norm * dEdp_model.y_std.numpy() + dEdp_model.y_mean.numpy()
         grad_H_q = pred_q_norm * dEdq_model.y_std.numpy() + dEdq_model.y_mean.numpy()
 
@@ -185,15 +157,10 @@ def compute_effort_force_error_curves(
     data=None,
     edge=5,
 ):
-    """
-    Computes time-resolved:
-        1. RMSE of dH/dq
-        2. RMSE of d/dz(dH/dq)
-        3. max_z |q_GP|
-        4. optional true max_z |q|
+    """Return time series of effort RMSE, force RMSE, and maximum absolute strain.
 
-    Returns:
-        Dictionary of 1D curves.
+    Also return the absolute force-error field and, when data is supplied,
+    the reference maximum absolute strain.
     """
 
     N_z, N_t = q_gp.shape
@@ -238,12 +205,9 @@ def compute_rollout_failure_stats(
     edge=5,
     q_growth_failure_threshold=3.0,
 ):
-    """
-    Computes rollout failure rate based on q-growth ratio:
+    """Summarize rollout failures using max|q_GP| / max|q_true|.
 
-        max |q_GP| / max |q_true|
-
-    A seed is counted as failed if the ratio exceeds q_growth_failure_threshold.
+    A seed fails when this ratio exceeds q_growth_failure_threshold.
     """
 
     q_growth_ratios = []
@@ -286,6 +250,7 @@ def compute_rollout_failure_stats(
 
 def plot_comparison(data, dEdp_model, dEdq_model,
                     simulator, save_path="gpphs_results.png", legend_tag="baseline"):
+    """Compare analytical and GP effort surfaces at a fixed spatial coordinate."""
     p_min, p_max = np.min(data['p']), np.max(data['p'])
     q_min, q_max = np.min(data['q']), np.max(data['q'])
 
@@ -293,7 +258,7 @@ def plot_comparison(data, dEdp_model, dEdq_model,
     p_test_flat = p_grid.flatten()
     q_test_flat = q_grid.flatten()
 
-    # NEW: Pick a fixed z location to visualize the surface and create an array of it
+    # Evaluate the surface at a fixed spatial coordinate.
     mid_z_idx = int(simulator.N / 2)
     z_val = simulator.z[mid_z_idx]
     z_test_flat = np.full_like(p_test_flat, z_val)
@@ -301,7 +266,7 @@ def plot_comparison(data, dEdp_model, dEdq_model,
     real_dEdp = simulator.dEdp(p_test_flat)
     real_dEdq = np.array([simulator.dEdq(q, mid_z_idx) for q in q_test_flat])
 
-    # NEW: Include z_test_flat in the test tensor
+    # Include the fixed spatial coordinate in the test inputs.
     X_test_raw = torch.tensor(np.stack([p_test_flat, q_test_flat, z_test_flat], axis=1), dtype=torch.float64)
 
     X_test_norm = (X_test_raw - dEdp_model.X_mean) / (dEdp_model.X_std + 1e-6)
@@ -345,20 +310,9 @@ def plot_effort_force_rmse_and_qmax_curves(
     title="Effort / Force Error and Strain Growth",
     save_path=None,
 ):
-    """
-    Plots:
-        1. RMSE of dH/dq over time
-        2. RMSE of d/dz(dH/dq) over time
-        3. max_z |q_GP| over time
+    """Plot effort RMSE, force RMSE, and maximum absolute strain over time.
 
-    Args:
-        curves:
-            Dictionary containing:
-                "t"
-                "dHdq_rmse_t"
-                "force_rmse_t"
-                "qmax_gp_t"
-                optionally "qmax_true_t"
+    Use the dictionary returned by compute_effort_force_error_curves().
     """
 
     t = curves["t"]
@@ -406,14 +360,10 @@ def plot_force_field_error_heatmap(
     title="Force-Field Error Heatmap",
     save_path=None,
 ):
-    """
-    Plots heatmap of force-field error:
+    """Plot the absolute spatial-derivative error in dH/dq.
 
-        | d/dz(dH/dq_pred) - d/dz(dH/dq_true) |
-
-    Works for:
-        - individual seed heatmap
-        - average heatmap across seeds
+    Accept a single-seed summary or a precomputed force_error_abs field,
+    such as the mean absolute error across seeds.
     """
 
     if force_error_abs is None:
@@ -493,9 +443,7 @@ def plot_rollout_time_slices(
     title="1D String Configuration",
     pred_label_prefix="GP Pred.",
 ):
-    """
-    Plots displacement u(z,t) time slices.
-    """
+    """Plot displacement u(z, t) at selected time steps."""
 
     q_true = data["q"]
     z = simulator.z
@@ -567,28 +515,11 @@ def plot_overlaid_average_rollout_time_slices(
     title="Average Rollout Comparison",
     legend_ncol=3,
 ):
-    """
-    Overlay averaged rollout trajectories from multiple model configurations.
+    """Overlay mean displacement trajectories for several models.
 
-    Args:
-        data:
-            True test data dictionary containing data["q"].
-        model_summaries:
-            List of dictionaries. Each dictionary should contain:
-                {
-                    "label": short label for legend,
-                    "q_gp_mean": mean GP rollout strain, shape [N_z, N_t]
-                }
-        simulator:
-            Simulator object.
-        time_slices:
-            Time steps to plot.
-        save_path:
-            If provided, saves the figure. Otherwise displays it.
-        title:
-            Figure title.
-        legend_ncol:
-            Number of legend columns.
+    Each model summary contains a label and q_gp_mean with shape (N_z, N_t).
+    Select time-step indices with time_slices. Save to save_path if supplied,
+    or display the figure otherwise.
     """
 
     q_true = data["q"]
@@ -663,7 +594,7 @@ def plot_overlaid_average_rollout_time_slices(
         if ax_idx == 0:
             ax.set_ylabel("Displacement u")
 
-    # One shared legend, not repeated in every subplot.
+    # Use one legend for the full figure.
     fig.legend(
         handles,
         labels,
@@ -689,22 +620,10 @@ def plot_multi_profile_rollout_grid(
     save_path=None,
     figsize=(12.0, 8.0),
 ):
-    """
-    Plot the saved rollout trajectories in a profile-by-time grid.
+    """Plot saved rollouts in a profile-by-time grid.
 
-    Parameters
-    ----------
-    profile_results:
-        The value of plot_artifact["profiles"].
-
-    time_slices:
-        Time-step indices shown as columns.
-
-    save_path:
-        Figure output path. PDF is recommended for papers.
-
-    figsize:
-        Matplotlib figure dimensions.
+    Pass plot_artifact["profiles"] as profile_results and choose time-step
+    indices with time_slices.
     """
     n_rows = len(profile_results)
     n_cols = len(time_slices)
@@ -875,12 +794,9 @@ def plot_multi_profile_rollout_grid(
 
 
 def spatial_derivative_centered(f, dz, boundary_value=np.nan):
-    """
-    Compute df/dz using the same centered-difference structure as the simulator
-    on interior points.
+    """Compute centered spatial differences at interior points.
 
-    Boundary values are set to NaN by default because the simulator imposes
-    boundary conditions separately.
+    Leave boundaries as NaN by default; the simulator handles them separately.
     """
     df_dz = np.full_like(f, boundary_value, dtype=float)
     df_dz[1:-1] = (f[2:] - f[:-2]) / (2.0 * dz)
@@ -888,39 +804,31 @@ def spatial_derivative_centered(f, dz, boundary_value=np.nan):
 
 
 def _relative_l2(pred, true, eps=1e-12):
-    """Relative Frobenius/L2 error."""
+    """Return the relative Frobenius/L2 error."""
     return np.linalg.norm((pred - true).ravel()) / (np.linalg.norm(true.ravel()) + eps)
 
 
 def _rmse(pred, true):
+    """Return the root mean squared error."""
     return float(np.sqrt(np.mean((pred - true) ** 2)))
 
 
 def _mae(pred, true):
+    """Return the mean absolute error."""
     return float(np.mean(np.abs(pred - true)))
 
 
 def reconstruct_displacement_from_strain(q, simulator):
-    """
-    Reconstruct displacement u from strain q = du/dz.
-
-    This fixes u(z=0)=0. For comparison purposes this is sufficient,
-    since both true and GP displacement are reconstructed the same way.
-    """
+    """Approximate displacement by cumulative rectangular integration of strain."""
     return np.cumsum(q, axis=0) * simulator.dz
 
 
 def compute_rollout_error_metrics(data, p_gp, q_gp, simulator):
-    """
-    Computes numerical rollout errors between true PDE trajectory and GP-PHS rollout.
-
-    Returns:
-        dict of scalar metrics.
-    """
+    """Compare the reference and GP-PHS trajectories using scalar error metrics."""
     p_true = data["p"]
     q_true = data["q"]
 
-    # Align in case solve_ivp returned fewer columns.
+    # Align trajectories to their common time range.
     T_common = min(p_true.shape[1], p_gp.shape[1], q_true.shape[1], q_gp.shape[1])
     p_true = p_true[:, :T_common]
     q_true = q_true[:, :T_common]
@@ -953,13 +861,9 @@ def compute_rollout_error_metrics(data, p_gp, q_gp, simulator):
 
 
 def compute_energy_error_metrics(data, p_gp, q_gp, simulator):
-    """
-    Computes Hamiltonian trajectory error.
+    """Compare Hamiltonian values along reference and GP trajectories.
 
-    Important:
-        Because the system has damping and external forcing, the true energy
-        is not conserved. Therefore this compares H evaluated on the GP
-        rollout to H evaluated on the true rollout.
+    Damping and external forcing mean that reference energy is not conserved.
     """
     p_true = data["p"]
     q_true = data["q"]
@@ -985,13 +889,9 @@ def compute_energy_error_metrics(data, p_gp, q_gp, simulator):
 
 
 def make_flat_dataset_from_sim_data(data):
-    """
-    Reconstructs X = [p, q, z], y_p = dH/dp, y_q = dH/dq from simulator data.
+    """Build inputs [p, q, z] and targets dH/dp and dH/dq.
 
-    Returns:
-        X_all: shape [N*T, 3]
-        y_p_all: shape [N*T]
-        y_q_all: shape [N*T]
+    Return inputs of shape (N * T, 3) and two targets of shape (N * T,).
     """
     p_flat = data["p"].flatten()
     q_flat = data["q"].flatten()
@@ -1008,11 +908,7 @@ def make_flat_dataset_from_sim_data(data):
 
 
 def _model_mean_physical(model, X_raw_tensor):
-    """
-    Predicts physical-scale GP posterior mean.
-
-    This function keeps gradients enabled so it can be used for curl/integrability.
-    """
+    """Predict the GP mean in physical units with gradients enabled."""
     X_mean = model.X_mean.to(X_raw_tensor.device)
     X_std = model.X_std.to(X_raw_tensor.device)
     y_mean = model.y_mean.to(X_raw_tensor.device)
@@ -1033,20 +929,10 @@ def compute_curl_integrability_error(
     batch_size=256,
     seed=0,
 ):
-    """
-    Computes the Hamiltonian integrability/curl error:
+    """Measure curl = d/dq(dH/dp) - d/dp(dH/dq).
 
-        curl = d/dq (dH/dp) - d/dp (dH/dq)
-
-    For a true scalar Hamiltonian H(p,q,z), this should be zero.
-
-    Since the GPs are trained separately, this metric checks whether their
-    learned gradients are compatible with a shared Hamiltonian.
-
-    Args:
-        dEdp_model: GP model for dH/dp.
-        dEdq_model: GP model for dH/dq.
-        X_raw: numpy array [M, 3] with columns [p, q, z].
+    Zero curl is required for a shared scalar Hamiltonian. X_raw has shape
+    (M, 3) with columns [p, q, z].
     """
     dEdp_model.eval()
     dEdq_model.eval()
@@ -1069,7 +955,7 @@ def compute_curl_integrability_error(
             dtype=torch.float64,
         )
 
-        # ----- d/dq (dH/dp) -----
+        # Differentiate dH/dp with respect to q.
         X_p = X_batch.clone().detach().requires_grad_(True)
         mean_p, X_p_norm = _model_mean_physical(dEdp_model, X_p)
         grad_p_raw = torch.autograd.grad(
@@ -1080,7 +966,7 @@ def compute_curl_integrability_error(
         )[0]
         d_dq_dHdp = grad_p_raw[:, 1]
 
-        # ----- d/dp (dH/dq) -----
+        # Differentiate dH/dq with respect to p.
         X_q = X_batch.clone().detach().requires_grad_(True)
         mean_q, X_q_norm = _model_mean_physical(dEdq_model, X_q)
         grad_q_raw = torch.autograd.grad(
@@ -1112,11 +998,10 @@ def gp_predict_with_uncertainty(
     batch_size=2048,
     include_likelihood_noise=True,
 ):
-    """
-    Predicts mean and standard deviation in physical units.
+    """Predict the mean and standard deviation in physical units.
 
-    If include_likelihood_noise=True, reports predictive uncertainty for noisy
-    observations. If False, reports latent-function uncertainty.
+    Include observation noise when include_likelihood_noise is True;
+    otherwise return latent-function uncertainty.
     """
     model.eval()
     likelihood.eval()
@@ -1147,9 +1032,7 @@ def gp_predict_with_uncertainty(
 
 
 def compute_single_calibration_metrics(y_true, mean, std):
-    """
-    Calibration metrics for one scalar GP output.
-    """
+    """Compute calibration metrics for one scalar GP output."""
     std = np.maximum(std, 1e-12)
     residual = y_true - mean
     z_score = residual / std
@@ -1176,24 +1059,11 @@ def compute_dHdq_force_metrics_from_predictions(
     grid_shape,
     edge=5,
 ):
-    """
-    Compute RMSE of d/dz(dH/dq) using already-computed dH/dq predictions.
+    """Measure spatial-derivative error from flattened dH/dq predictions.
 
-    Args:
-        dHdq_pred_flat:
-            Flattened GP-predicted dH/dq values, shape [N_z * N_t].
-        dHdq_true_flat:
-            Flattened true dH/dq values, shape [N_z * N_t].
-        simulator:
-            Simulator object with N and dz.
-        grid_shape:
-            Tuple (N_z, N_t). Must match the flattening order used in
-            make_flat_dataset_from_sim_data().
-        edge:
-            Number of boundary cells to exclude.
-
-    Returns:
-        Dictionary of force-field error metrics.
+    Inputs have shape (N_z * N_t,) and use the flattening order from
+    make_flat_dataset_from_sim_data(). grid_shape is (N_z, N_t);
+    edge sets the boundary cells excluded from RMSE scoring.
     """
 
     N_z, N_t = grid_shape
@@ -1261,10 +1131,7 @@ def compute_uncertainty_calibration_metrics(
     sampling="random",
     include_likelihood_noise=True,
 ):
-    """
-    Computes uncertainty calibration for dH/dp and dH/dq predictions
-    on held-out derivative targets.
-    """
+    """Evaluate uncertainty calibration on held-out effort targets."""
     dHdp_mean, dHdp_std = gp_predict_with_uncertainty(
         dEdp_model,
         dEdp_likelihood,
@@ -1323,7 +1190,7 @@ def compute_uncertainty_calibration_metrics(
         grid_shape=grid_shape,
     )
 
-    # Store scalar force metrics only inside calibration.
+    # Store force metrics in the calibration results.
     metrics["dHdq_force"] = force_metrics
     dHdq_summary["dHdq_mean"] = dHdq_mean
     dHdq_summary["dHdq_true"] = dHdq_true
@@ -1345,12 +1212,7 @@ def evaluate_gp_phs_model(
     seed=42,
     sampling="random"
 ):
-    """
-    Full evaluation suite for paper reporting.
-
-    Returns:
-        metrics: nested dictionary
-    """
+    """Return rollout, energy, integrability, and calibration metrics."""
     rollout_metrics = compute_rollout_error_metrics(data, p_gp, q_gp, simulator)
     energy_metrics, H_true, H_gp = compute_energy_error_metrics(data, p_gp, q_gp, simulator)
 
@@ -1389,9 +1251,7 @@ def evaluate_gp_phs_model(
 
 
 def print_metrics_report(metrics):
-    """
-    Nicely prints evaluation metrics.
-    """
+    """Print the evaluation metrics."""
     print("\n================ GP-PHS Evaluation Metrics ================\n")
 
     print("[Rollout Error]")

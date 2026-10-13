@@ -12,10 +12,12 @@ StiffnessFunction = Callable[[SimulatorConfig, np.ndarray], np.ndarray]
 
 
 def const_stiffness(z_arr):
+    """Return a uniform stiffness profile."""
     return np.ones_like(z_arr) * 10.0
 
 
 def periodic_stiffness(num_hinges, length, z_arr):
+    """Return a cosine stiffness profile with the specified hinge count."""
     hinge_freq = num_hinges * np.pi / length
     return 10.0 + 4.0 * np.cos(2 * hinge_freq * z_arr)
 
@@ -28,7 +30,7 @@ def periodic_c2_bumps(
     amplitude: float = 4.0,
     radius: float | None = None,
 ) -> np.ndarray:
-    """Construct deterministic compactly supported Wendland C2 bumps."""
+    """Build compactly supported Wendland C2 bumps."""
     z_arr = np.asarray(z_arr, dtype=float)
 
     if radius is None:
@@ -64,7 +66,7 @@ def c2_multiscale_stiffness(
     min_radius_frac: float = 0.035,
     max_radius_frac: float = 0.12,
 ) -> np.ndarray:
-    """Construct a fixed randomized multiscale Wendland-C2 profile."""
+    """Build a seeded multiscale Wendland C2 stiffness profile."""
     if num_bumps <= 0:
         raise ValueError("num_bumps must be positive.")
     if not 0.0 < min_radius_frac <= max_radius_frac:
@@ -112,7 +114,7 @@ def piecewise_stiffness(
     transition_width: float | None = None,
     smoothness: str = "C2",
 ) -> np.ndarray:
-    """Construct a two-region stiffness profile with a smooth transition."""
+    """Build a two-region stiffness profile with a smooth transition."""
     z_arr = np.asarray(z_arr, dtype=float)
     k_left, k_right = values
 
@@ -153,13 +155,7 @@ def piecewise_stiffness(
 def sharp_transition_stiffness(
     length, z_arr, low=6.0, high=14.0, center=None, width=0.1
 ):
-    """
-    Smooth but sharp transition between two stiffness levels.
-
-    Regularity: smooth for finite width, but approaches a discontinuous
-    step as width -> 0.
-    Useful for testing changepoint kernels and robustness to sharp interfaces.
-    """
+    """Build a smooth, sharp transition between two stiffness levels."""
     z_arr = np.asarray(z_arr)
 
     if center is None:
@@ -174,7 +170,7 @@ def build_stiffness_profile(
     config: SimulatorConfig,
     z_arr: np.ndarray,
 ) -> np.ndarray:
-    """Construct the configured material stiffness field."""
+    """Build the configured stiffness profile."""
     profile = config.stiffness_profile
 
     if profile == "constant":
@@ -216,6 +212,7 @@ def build_stiffness_profile(
 
 class SoftRodSimulator:
     def __init__(self, config: SimulatorConfig):
+        """Initialize the spatial grid, stiffness, and external force profile."""
         self.config = config
         self.L = config.L
         self.N = config.N
@@ -230,11 +227,11 @@ class SoftRodSimulator:
         self.dz = float(self.z[1] - self.z[0])
         self.stiffness = build_stiffness_profile(config, self.z)
 
-        # This spatial factor is constant throughout all ODE evaluations.
+        # Cache the spatial force profile for ODE evaluations.
         self.motor_location = np.exp(-10.0 * (self.z - self.L / 2.0) ** 2)
 
     def dEdq(self, q: np.ndarray) -> np.ndarray:
-        """Evaluate dH/dq for q with shape (N,) or (N,T)."""
+        """Evaluate dH/dq for q with shape (N,) or (N, T)."""
         q = np.asarray(q, dtype=float)
 
         if q.ndim == 1:
@@ -251,44 +248,36 @@ class SoftRodSimulator:
         return stiffness * q + 2.0 * q**3
 
     def dEdp(self, p):
-        """Derivative of kinetic energy w.r.t momentum"""
+        """Evaluate the kinetic energy gradient dH/dp."""
         return np.asarray(p, dtype=float)
 
     def motor_force(self, t, z):
-        """
-        Time-dependent external force u(t).
-        Simulates motors embedded at specific locations along the rod,
-        pulsing energy into the system over time.
-        """
-        # Example: A motor at the middle of the rod that pulses periodically
+        """Apply a sinusoidal force localized at the rod center."""
         motor_pulse = np.sin(2.0 * np.pi * t)
         return self.motor_location * motor_pulse
 
     def evaluate_ph_dynamics(self, grad_H_p, grad_H_q, t):
-        """
-        The core Port-Hamiltonian structural physics mapping:
-        dx/dt = (J - R) * dH/dx + G * u(t)
-        """
+        """Evaluate the port-Hamiltonian dynamics dx/dt = (J - R) dH/dx + G u(t)."""
 
-        # J matrix (Interconnection via spatial derivative)
+        # Apply spatial coupling through J.
         dq_dt = spatial_derivative_centered(grad_H_p, self.dz, boundary_value=0.0)
         dp_dt = spatial_derivative_centered(grad_H_q, self.dz, boundary_value=0.0)
 
-        # R matrix (Dissipation)
+        # Apply damping through R.
         dp_dt -= self.damping * grad_H_p
 
-        # EXTERNAL INPUT: Adding the time-dependent motor force to momentum
+        # Add external forcing to the momentum equation.
         dp_dt += self.motor_force(t, self.z)
 
-        # Boundary conditions (Fixed ends)
-        dq_dt[0] = (grad_H_p[1] - grad_H_p[0]) / self.dz  # One-sided derivatives at boundaries
+        # Use one-sided strain derivatives and fixed-end momentum conditions.
+        dq_dt[0] = (grad_H_p[1] - grad_H_p[0]) / self.dz
         dq_dt[-1] = (grad_H_p[-1] - grad_H_p[-2]) / self.dz
         dp_dt[[0, -1]] = 0.0
 
         return np.concatenate([dp_dt, dq_dt])
 
     def pde_rhs(self, t, state):
-        """Standard RHS using true analytical energy gradients."""
+        """Evaluate the dynamics using analytical energy gradients."""
         p = state[: self.N]
         q = state[self.N :]
 
@@ -297,6 +286,7 @@ class SoftRodSimulator:
         )
 
     def generate_dataset(self, get_init_q_config):
+        """Simulate the reference dynamics and return states and energy gradients."""
         q0 = get_init_q_config(self.z, self.L)
         p0 = np.zeros(self.N)
         state0 = np.concatenate([p0, q0])
@@ -340,12 +330,9 @@ class SoftRodSimulator:
         }
 
     def energy_density(self, p, q):
-        """
-        Hamiltonian density:
-            h(p,q,z) = 1/2 p^2 + 1/2 k(z) q^2 + 1/2 q^4
+        """Evaluate h = p^2 / 2 + k(z) q^2 / 2 + q^4 / 2.
 
-        Supports:
-            p, q shape [N] or [N, T]
+        Inputs p and q have shape (N,) or (N, T).
         """
         k = self.stiffness
 
@@ -358,12 +345,9 @@ class SoftRodSimulator:
         raise ValueError(f"Expected p, q to have ndim 1 or 2, got {p.ndim}.")
 
     def total_energy(self, p, q):
-        """
-        Spatial integral of the Hamiltonian density.
+        """Integrate the Hamiltonian density over space.
 
-        Returns:
-            scalar if p, q are [N]
-            array of shape [T] if p, q are [N, T]
+        Return a scalar for (N,) inputs or an array of shape (T,) for (N, T).
         """
         density = self.energy_density(p, q)
         return np.trapezoid(density, self.z, axis=0)

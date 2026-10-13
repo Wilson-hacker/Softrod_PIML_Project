@@ -53,9 +53,7 @@ InitialCondition = Callable[[np.ndarray, float], np.ndarray]
 
 @dataclass(frozen=True)
 class ODESolverConfig:
-    """
-    Numerical settings shared by reference simulation and GP rollout.
-    """
+    """Solver settings shared by reference simulation and GP rollout."""
 
     method: ODESolverMethod = "RK45"
     rtol: float = 1e-3
@@ -63,6 +61,7 @@ class ODESolverConfig:
     max_step: float | None = None
 
     def __post_init__(self) -> None:
+        """Validate solver tolerances and the maximum step size."""
         if not math.isfinite(self.rtol) or self.rtol <= 0.0:
             raise ValueError("rtol must be finite and positive.")
 
@@ -75,6 +74,7 @@ class ODESolverConfig:
             raise ValueError("max_step must be finite and positive, or None.")
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the configuration for experiment artifacts."""
         return {
             "method": self.method,
             "rtol": self.rtol,
@@ -85,7 +85,7 @@ class ODESolverConfig:
 
 @dataclass(frozen=True)
 class SimulatorConfig:
-    """Configuration of the reference physical simulator."""
+    """Reference simulator settings."""
 
     L: float = 10.0
     N: int = 60
@@ -99,6 +99,7 @@ class SimulatorConfig:
     ode_solver: ODESolverConfig = field(default_factory=ODESolverConfig)
 
     def __post_init__(self) -> None:
+        """Validate grid, time, and physical parameters."""
         if self.L <= 0.0:
             raise ValueError("L must be positive.")
         if self.N < 3:
@@ -115,7 +116,7 @@ class SimulatorConfig:
             raise ValueError("profile_seed must be nonnegative.")
 
     def cache_key(self) -> tuple[Any, ...]:
-        """Return a hashable identity for deterministic simulation caching."""
+        """Return a cache key for the simulation settings."""
 
         solver = self.ode_solver
         return (
@@ -150,7 +151,7 @@ class SimulatorConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """Configuration of one GP-PHS covariance architecture."""
+    """Kernel settings for one GP effort model."""
 
     label: str
     reduced_input_variables: tuple[InputVariable, ...] = ("q", "z")
@@ -164,6 +165,7 @@ class ModelConfig:
     n_freqs: int = 10
 
     def __post_init__(self) -> None:
+        """Validate kernel settings and supported combinations."""
         if not self.label.strip():
             raise ValueError("Model label cannot be empty.")
         if self.matern_nu <= 0.0:
@@ -199,7 +201,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    """Optimization and normalization settings for exact GP training."""
+    """Optimization settings for exact GP training."""
 
     training_iter: int = 1000
     patience: int = 15
@@ -210,6 +212,7 @@ class TrainingConfig:
     init_spatial_lengthscale: float | None = None
 
     def __post_init__(self) -> None:
+        """Validate optimization and logging settings."""
         if self.training_iter <= 0:
             raise ValueError("training_iter must be positive.")
         if self.patience <= 0:
@@ -222,6 +225,7 @@ class TrainingConfig:
             raise ValueError("log_interval must be positive.")
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the configuration for experiment artifacts."""
         return {
             "training_iter": self.training_iter,
             "patience": self.patience,
@@ -246,6 +250,7 @@ class SamplingConfig:
     z_col: int = 2
 
     def __post_init__(self) -> None:
+        """Validate the sampling fraction, region bounds, and weights."""
         if self.method not in {"random", "stratified"}:
             raise ValueError(f"Unsupported sampling method: {self.method!r}.")
         if not 0.0 < self.train_fraction < 1.0:
@@ -266,6 +271,7 @@ class SamplingConfig:
             raise ValueError("middle_region and right_region overlap.")
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the configuration for experiment artifacts."""
         return {
             "method": self.method,
             "train_fraction": self.train_fraction,
@@ -287,6 +293,7 @@ class EvaluationConfig:
     include_likelihood_noise: bool = True
 
     def __post_init__(self) -> None:
+        """Validate evaluation sample counts and boundary exclusion."""
         if self.curl_max_points <= 0:
             raise ValueError("curl_max_points must be positive.")
         if self.curl_batch_size <= 0:
@@ -295,6 +302,7 @@ class EvaluationConfig:
             raise ValueError("force_edge must be at least 1.")
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the configuration for experiment artifacts."""
         return {
             "curl_max_points": self.curl_max_points,
             "curl_batch_size": self.curl_batch_size,
@@ -311,6 +319,7 @@ class ParallelConfig:
     start_method: Literal["spawn", "forkserver"] = "spawn"
 
     def __post_init__(self) -> None:
+        """Validate process and per-worker thread limits."""
         if self.max_workers is not None and self.max_workers <= 0:
             raise ValueError("max_workers must be positive or None.")
         if (
@@ -344,6 +353,7 @@ class ExperimentSpec:
     seeds: tuple[int, ...] = (6, 42, 79, 123, 456)
 
     def __post_init__(self) -> None:
+        """Validate the experiment name, model labels, and seeds."""
         if not self.name.strip():
             raise ValueError("Experiment name cannot be empty.")
         if not self.models:

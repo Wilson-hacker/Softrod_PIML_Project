@@ -21,12 +21,7 @@ from data_processing import (
 
 
 class PhysicalMeanPredictor(torch.nn.Module):
-    """
-    Evaluate one ExactGP posterior mean and transform it back to physical units.
-
-    The normalization tensors are prepared once rather than transferred or
-    retrieved repeatedly during every ODE right-hand-side evaluation.
-    """
+    """Evaluate GP posterior means in physical units using cached normalization."""
 
     X_mean: torch.Tensor
     X_std: torch.Tensor
@@ -38,6 +33,7 @@ class PhysicalMeanPredictor(torch.nn.Module):
         model: Any,
         reference_input: torch.Tensor,
     ) -> None:
+        """Cache the model normalization statistics on the input device."""
         super().__init__()
 
         self.model = model
@@ -50,8 +46,7 @@ class PhysicalMeanPredictor(torch.nn.Module):
         y_mean = cast(torch.Tensor, model.y_mean)
         y_std = cast(torch.Tensor, model.y_std)
 
-        # Match the existing code: move to the input device but do not
-        # explicitly change dtype.
+        # Move statistics to the input device while preserving their dtype.
         self.register_buffer(
             "X_mean",
             X_mean.detach().to(device=device).clone(),
@@ -74,6 +69,7 @@ class PhysicalMeanPredictor(torch.nn.Module):
         self,
         X_raw: torch.Tensor,
     ) -> torch.Tensor:
+        """Standardize physical inputs using the cached statistics."""
         return normalize_tensor(
             values=X_raw, mean=self.X_mean, standard_deviation=self.X_std
         )
@@ -82,6 +78,7 @@ class PhysicalMeanPredictor(torch.nn.Module):
         self,
         X_raw: torch.Tensor,
     ) -> gpytorch.distributions.MultivariateNormal:
+        """Return the latent GP posterior for physical inputs."""
         X_normalized = self.normalize_inputs(X_raw)
 
         distribution = self.model(X_normalized)
@@ -92,6 +89,7 @@ class PhysicalMeanPredictor(torch.nn.Module):
         self,
         normalized_mean: torch.Tensor,
     ) -> torch.Tensor:
+        """Convert a normalized posterior mean to physical units."""
         return denormalize_tensor(
             normalized_values=normalized_mean,
             mean=self.y_mean,
@@ -102,6 +100,7 @@ class PhysicalMeanPredictor(torch.nn.Module):
         self,
         normalized_standard_deviation: torch.Tensor,
     ) -> torch.Tensor:
+        """Convert a normalized posterior standard deviation to physical units."""
         return denormalize_standard_deviation(
             normalized_standard_deviation=normalized_standard_deviation,
             standard_deviation=self.y_std,
@@ -111,6 +110,7 @@ class PhysicalMeanPredictor(torch.nn.Module):
         self,
         X_raw: torch.Tensor,
     ) -> torch.Tensor:
+        """Predict the posterior mean in physical units."""
         distribution = self.latent_distribution(X_raw)
         normalized_mean = distribution.mean
         return self.denormalize_mean(normalized_mean)
@@ -120,7 +120,7 @@ def attach_normalization_stats(
     models: TrainedModels,
     normalization: NormalizationStats,
 ) -> None:
-    """Attach normalization metadata expected by the current GP models."""
+    """Attach input and output normalization statistics to both GP models."""
     models.dEdp_model.X_mean = normalization.X_mean
     models.dEdp_model.X_std = normalization.X_std
     models.dEdp_model.y_mean = normalization.y_p_mean
@@ -133,6 +133,7 @@ def attach_normalization_stats(
 
 
 def tensor_to_numpy(tensor: torch.Tensor) -> np.ndarray:
+    """Detach a tensor and convert it to a NumPy array on CPU."""
     detached = tensor.detach()
     if detached.device.type != "cpu":
         detached = detached.cpu()
@@ -150,16 +151,10 @@ def simulate_gp_phs(
     models: TrainedModels,
     initial_condition: InitialCondition,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Integrate the learned GP-PHS dynamics.
+    """Integrate the learned GP-PHS dynamics on CPU.
 
-    Optimizations:
-        1. Preallocate the NumPy input matrix.
-        2. Share it with Torch through torch.from_numpy().
-        3. Prepare normalization tensors once.
-        4. Optionally compile the two physical-mean predictors.
-        5. Disable gradient tracking around the complete IVP solve.
-        6. Skip posterior covariance construction because only the mean is used.
+    Reuse a shared NumPy/Torch input buffer and cached normalization tensors.
+    Disable gradients and posterior variances during integration.
     """
     q0 = np.asarray(initial_condition(simulator.z, simulator.L), dtype=np.float64)
 
@@ -183,8 +178,7 @@ def simulate_gp_phs(
     if dEdp_device != dEdq_device:
         raise ValueError("The dH/dp and dH/dq models must be on the same device.")
 
-    # The zero-copy NumPy/Torch buffer path is designed for CPU inference,
-    # which matches the current SciPy-based rollout.
+    # Sharing the NumPy/Torch input buffer requires CPU models.
     if dEdp_device.type != "cpu":
         raise ValueError(
             "The optimized SciPy rollout currently requires CPU GP models. "
@@ -192,10 +186,7 @@ def simulate_gp_phs(
             "between CPU and GPU."
         )
 
-    # Preallocate one input matrix for the complete rollout.
-    #
-    # NumPy owns the memory. torch.from_numpy() creates a tensor that shares
-    # that memory without copying it.
+    # Reuse one input buffer shared by NumPy and Torch.
     X_raw_numpy = np.empty((simulator.N, 3), dtype=np.float64)
 
     X_raw_numpy[:, 0] = p0
@@ -208,8 +199,7 @@ def simulate_gp_phs(
 
     solver_config = simulator.config.ode_solver
 
-    # Put the context around predictor preparation and the entire synchronous
-    # solve rather than entering torch.no_grad() inside every RHS evaluation.
+    # Disable gradients and posterior variances for the full solve.
     with torch.no_grad(), gpytorch.settings.skip_posterior_variances(True):
         models.dEdp_model.eval()
         models.dEdq_model.eval()
@@ -224,11 +214,11 @@ def simulate_gp_phs(
             t: float,
             state: np.ndarray,
         ) -> np.ndarray:
+            """Evaluate the dynamics using GP-predicted effort fields."""
             p = state[: simulator.N]
             q = state[simulator.N :]
 
-            # Update only the two state-dependent columns.
-            # The z column was filled once before solve_ivp().
+            # Update p and q; the spatial coordinates remain fixed.
             X_raw_numpy[:, 0] = p
             X_raw_numpy[:, 1] = q
 
@@ -276,7 +266,7 @@ def reconstruct_displacement_from_strain(
     q: np.ndarray,
     dz: float,
 ) -> np.ndarray:
-    """Reconstruct u with u(0,t)=0 using the project's existing scheme."""
+    """Integrate strain with the trapezoidal rule and u(0, t) = 0."""
 
     q = np.asarray(q, dtype=float)
 

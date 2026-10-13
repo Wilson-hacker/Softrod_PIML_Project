@@ -13,7 +13,7 @@ from simulator import build_stiffness_profile
 
 
 def load_experiment_artifact(path: str | Path) -> dict[str, Any]:
-    """Load a trusted experiment artifact produced by main.py."""
+    """Load a trusted experiment artifact produced by run_experiments.py."""
     path = Path(path)
     with path.open("rb") as file:
         artifact = pickle.load(file)
@@ -28,6 +28,7 @@ def load_experiment_artifact(path: str | Path) -> dict[str, Any]:
 
 
 def _finalize_figure(figure: plt.Figure, save_path: str | Path | None) -> None:
+    """Display the figure or save it and close it."""
     if save_path is None:
         plt.show()
         return
@@ -45,6 +46,7 @@ def plot_multi_profile_rollout_grid_from_artifact(
     save_path: str | Path | None = None,
     figsize: tuple[float, float] = (12.0, 8.0),
 ) -> None:
+    """Plot saved displacement rollouts in a profile-by-time grid."""
     experiments = artifact["experiments"]
 
     if experiment_filter is None:
@@ -162,6 +164,7 @@ def plot_effort_force_curves_from_artifact(
     save_path: str | Path | None = None,
     title: str | None = None,
 ) -> None:
+    """Plot saved effort and force RMSE curves over time."""
     profile = artifact["experiments"][experiment_name]
     model = profile["models"][model_label]
     curves = model.get("mean_diagnostic_curves")
@@ -197,7 +200,7 @@ def plot_force_field_error_heatmap_from_artifact(
     edge: int = 5,
     save_path: str | Path | None = None,
 ) -> None:
-
+    """Plot the saved absolute force error over space and time."""
     profile = artifact["experiments"][experiment_name]
     model = profile["models"][model_label]
     force_error = np.asarray(model["dHdq_force_error"])
@@ -255,27 +258,10 @@ def plot_stiffness_profiles(
     num_plot_points: int = 1000,
     save_path: str | Path = "./plots/stiffness_profiles.pdf",
 ) -> None:
-    """
-    Plot stiffness profiles on a dense spatial grid.
+    """Plot stiffness profiles on a dense grid independent of the simulation grid.
 
-    The dense plotting grid is independent of the simulator resolution used
-    in the actual experiments.
-
-    Parameters
-    ----------
-    experiment_specs:
-        Experiment specifications, e.g. the tuple returned by
-        build_paper_experiments().
-
-    experiment_filter:
-        Optional sequence of experiment names to include. The profiles are
-        plotted in the same order as they appear in experiment_specs.
-
-    num_plot_points:
-        Number of spatial points used only for plotting.
-
-    save_path:
-        Output path for the figure.
+    Use experiment_filter to select profiles in experiment_specs order.
+    Set num_plot_points to control the plotting resolution.
     """
     if num_plot_points < 2:
         raise ValueError("num_plot_points must be at least 2.")
@@ -347,34 +333,12 @@ def create_rollout_video_from_artifact(
     fps: int = 20,
     figsize: tuple[float, float] = (8.0, 6.0),
 ) -> None:
-    """
-    Generate a rollout animation from a saved experiment artifact.
+    """Save a rollout animation from a trusted experiment artifact.
 
-    The upper panel compares the numerical displacement with the GP rollout.
-    The lower panel shows the pointwise displacement prediction error.
-
-    Parameters
-    ----------
-    artifact_path:
-        Path to the saved .pkl artifact.
-
-    experiment_name:
-        Experiment to visualize, e.g. "periodic", "C2", or "piecewise".
-
-    model_label:
-        Model to visualize, e.g. "Baseline", "SD-RBF", or "SD-matched".
-
-    save_path:
-        Output video path. Supported extensions are .mp4 and .gif.
-
-    frame_stride:
-        Use every `frame_stride`-th time step in the animation.
-
-    fps:
-        Frames per second of the saved animation.
-
-    figsize:
-        Matplotlib figure size.
+    The panels show displacement trajectories and pointwise strain error.
+    Select a profile and model with experiment_name and model_label.
+    Use frame_stride to subsample time steps and fps to set playback speed.
+    MP4 output requires FFmpeg; GIF output uses Pillow.
     """
     artifact_path = Path(artifact_path)
     save_path = Path(save_path)
@@ -439,12 +403,11 @@ def create_rollout_video_from_artifact(
     if u_reference.shape[1] != t.size:
         raise ValueError("Temporal dimension of displacement does not match t.")
 
-    # error = u_prediction - u_reference
     q_error = q_prediction - q_reference
 
     frame_indices = np.arange(0, t.size, frame_stride, dtype=int)
 
-    # Fixed axis limits prevent the axes from jumping between frames.
+    # Keep axis limits fixed across frames.
     displacement_min = min(float(np.min(u_reference)), float(np.min(u_prediction)))
     displacement_max = max(float(np.max(u_reference)), float(np.max(u_prediction)))
 
@@ -462,7 +425,7 @@ def create_rollout_video_from_artifact(
 
     figure_title = figure.suptitle("", fontsize="large", y=0.97)
 
-    # Rollout panel
+    # Plot displacement trajectories.
     (reference_line,) = rollout_axis.plot(
         z, u_reference[:, 0], label="Numerical solution"
     )
@@ -480,7 +443,7 @@ def create_rollout_video_from_artifact(
 
     rollout_axis.legend()
 
-    # Error panel
+    # Plot strain error.
     (q_error_line,) = error_axis.plot(z, q_error[:, 0])
 
     error_axis.axhline(0.0, linewidth=1.0, linestyle=":")
@@ -495,9 +458,10 @@ def create_rollout_video_from_artifact(
     error_title = error_axis.set_title("", fontsize="medium")
 
     def update(frame_number: int):
+        """Update trajectories and error labels for one animation frame."""
         step = frame_indices[frame_number]
 
-        # Displacement rollout
+        # Update displacement trajectories.
         reference_u = u_reference[:, step]
         prediction_u = u_prediction[:, step]
 
@@ -505,7 +469,7 @@ def create_rollout_video_from_artifact(
 
         prediction_line.set_ydata(prediction_u)
 
-        # Strain prediction error
+        # Update strain error.
         reference_q = q_reference[:, step]
         prediction_q = q_prediction[:, step]
 
@@ -513,14 +477,14 @@ def create_rollout_video_from_artifact(
 
         q_error_line.set_ydata(strain_error)
 
-        # Figure title
+        # Update the frame title.
         figure_title.set_text(
             f"{profile['row_label']} — "
             f"{model_label} — "
             rf"$t={t[step]:.2f}$"
         )
 
-        # Instantaneous relative q error
+        # Compute the relative strain error for this frame.
         q_reference_norm = np.linalg.norm(reference_q)
 
         if q_reference_norm > 1e-12:

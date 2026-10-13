@@ -36,15 +36,18 @@ SELECTED_METRIC_PATHS: dict[str, tuple[str, ...]] = {
 
 
 def relative_l2(prediction: np.ndarray, reference: np.ndarray) -> float:
+    """Return the L2 error relative to the reference norm."""
     denominator = np.linalg.norm(reference.reshape(-1)) + 1e-12
     return float(np.linalg.norm((prediction - reference).reshape(-1)) / denominator)
 
 
 def rmse(prediction: np.ndarray, reference: np.ndarray) -> float:
+    """Return the root mean squared error."""
     return float(np.sqrt(np.mean((prediction - reference) ** 2)))
 
 
 def mae(prediction: np.ndarray, reference: np.ndarray) -> float:
+    """Return the mean absolute error."""
     return float(np.mean(np.abs(prediction - reference)))
 
 
@@ -53,6 +56,7 @@ def aligned_trajectories(
     p_gp: np.ndarray,
     q_gp: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Trim reference and predicted trajectories to a common time range."""
     p_reference = np.asarray(data["p"])
     q_reference = np.asarray(data["q"])
     n_t = min(
@@ -75,6 +79,7 @@ def compute_rollout_error_metrics(
     q_gp: np.ndarray,
     simulator: Any,
 ) -> dict[str, float]:
+    """Measure errors in momentum, strain, and reconstructed displacement."""
     p_ref, q_ref, p_gp, q_gp = aligned_trajectories(data, p_gp, q_gp)
     state_ref = np.concatenate((p_ref, q_ref), axis=0)
     state_gp = np.concatenate((p_gp, q_gp), axis=0)
@@ -102,6 +107,7 @@ def compute_energy_error_metrics(
     q_gp: np.ndarray,
     simulator: Any,
 ) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
+    """Compare Hamiltonian values along reference and GP trajectories."""
     p_ref, q_ref, p_gp, q_gp = aligned_trajectories(data, p_gp, q_gp)
     H_reference = simulator.total_energy(p_ref, q_ref)
     H_gp = simulator.total_energy(p_gp, q_gp)
@@ -126,6 +132,7 @@ def compute_curl_integrability_error(
     batch_size: int = 256,
     seed: int = 0,
 ) -> dict[str, float]:
+    """Measure curl = d/dq(dH/dp) - d/dp(dH/dq) in physical units."""
     dEdp_model.eval()
     dEdq_model.eval()
     rng = np.random.default_rng(seed)
@@ -186,6 +193,7 @@ def gp_predict_with_uncertainty(
     batch_size: int = 2048,
     include_likelihood_noise: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Predict means and standard deviations in physical units."""
     model.eval()
     likelihood.eval()
     model_device = model.X_mean.device
@@ -232,6 +240,7 @@ def compute_single_calibration_metrics(
     mean: np.ndarray,
     standard_deviation: np.ndarray,
 ) -> dict[str, float]:
+    """Compute error and uncertainty calibration metrics for one GP output."""
     standard_deviation = np.maximum(standard_deviation, 1e-12)
     residual = y_reference - mean
     z_score = residual / standard_deviation
@@ -257,6 +266,7 @@ def compute_dHdq_force_metrics_from_predictions(
     grid_shape: tuple[int, int],
     edge: int = 5,
 ) -> tuple[dict[str, float], dict[str, np.ndarray]]:
+    """Return force-error metrics and fields from flattened effort predictions."""
     n_z, n_t = grid_shape
     dHdq_prediction = np.asarray(dHdq_prediction_flat).reshape(n_z, n_t)
     dHdq_reference = np.asarray(dHdq_reference_flat).reshape(n_z, n_t)
@@ -305,6 +315,7 @@ def compute_uncertainty_calibration_metrics(
     simulator: Any,
     evaluation_config: EvaluationConfig,
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    """Evaluate held-out effort calibration and full-grid force error."""
     dHdp_mean, dHdp_std = gp_predict_with_uncertainty(
         models.dEdp_model,
         models.dEdp_likelihood,
@@ -360,6 +371,7 @@ def evaluate_gp_phs_model(
     evaluation_config: EvaluationConfig,
     seed: int,
 ) -> tuple[dict[str, Any], dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    """Evaluate rollout, energy, integrability, and calibration errors."""
     rollout_metrics = compute_rollout_error_metrics(
         evaluation_data, p_gp, q_gp, simulator
     )
@@ -391,6 +403,7 @@ def evaluate_gp_phs_model(
 
 
 def get_nested_metric(metrics: Mapping[str, Any], path: Sequence[str]) -> float:
+    """Read a scalar metric from a nested dictionary path."""
     current: Any = metrics
     for key in path:
         current = current[key]
@@ -398,6 +411,7 @@ def get_nested_metric(metrics: Mapping[str, Any], path: Sequence[str]) -> float:
 
 
 def extract_selected_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
+    """Collect the scalar metrics used in the aggregate report."""
     return {
         name: get_nested_metric(metrics, path)
         for name, path in SELECTED_METRIC_PATHS.items()
@@ -407,6 +421,7 @@ def extract_selected_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
 def aggregate_scalar_values(
     values: Sequence[float],
 ) -> tuple[float, float]:
+    """Return the mean and sample standard deviation, or zero for one sample."""
     values_array = np.asarray(values, dtype=float)
     mean = float(values_array.mean())
     standard_deviation = (
@@ -417,6 +432,7 @@ def aggregate_scalar_values(
 
 
 def aggregate_run_results(runs: Sequence[RunResult]) -> AggregateResult:
+    """Aggregate metrics, trajectories, and changepoint estimates across seeds."""
     if not runs:
         raise ValueError("At least one run is required for aggregation.")
 
@@ -483,6 +499,7 @@ def aggregate_run_results(runs: Sequence[RunResult]) -> AggregateResult:
 
 
 def print_metrics_report(metrics: Mapping[str, Any]) -> None:
+    """Print the evaluation metrics."""
     print("\n================ GP-PHS Evaluation Metrics ================\n")
     for section_key, title in (
         ("rollout", "Rollout Error"),

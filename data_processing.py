@@ -23,6 +23,7 @@ def random_z_indices(
     train_fraction: float,
     seed: int,
 ) -> np.ndarray:
+    """Sample training indices uniformly without replacement."""
     num_train = int(X.shape[0] * train_fraction)
     if num_train <= 0:
         raise ValueError("The requested training fraction selects no samples.")
@@ -105,6 +106,7 @@ def select_training_indices(
     config: SamplingConfig,
     seed: int,
 ) -> np.ndarray:
+    """Select training indices using the configured sampling method."""
     if config.method == "random":
         return random_z_indices(X, config.train_fraction, seed)
 
@@ -125,7 +127,7 @@ def select_training_indices(
 def make_flat_dataset_from_sim_data(
     data: Mapping[str, np.ndarray],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Construct X=[p,q,z], dH/dp targets, and dH/dq targets."""
+    """Build inputs [p, q, z] and targets dH/dp and dH/dq."""
     p = np.asarray(data["p"])
     q = np.asarray(data["q"])
     z = np.asarray(data["z"])
@@ -153,7 +155,7 @@ def prepare_training_dataset(
     sampling_config: SamplingConfig,
     seed: int,
 ) -> DatasetBundle:
-    """Create training tensors, exact held-out indices, and normalization data."""
+    """Prepare training tensors, held-out indices, and normalization statistics."""
     X_all, y_p_all, y_q_all = make_flat_dataset_from_sim_data(reference_data)
     train_indices = select_training_indices(X_all, sampling_config, seed)
 
@@ -218,11 +220,7 @@ def normalize_tensor(
     mean: torch.Tensor,
     standard_deviation: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Normalize a tensor using precomputed statistics.
-
-    All statistics are converted to the input tensor's dtype and device.
-    """
+    """Normalize values after matching statistics to their dtype and device."""
     mean_aligned = mean.to(device=values.device, dtype=values.dtype)
 
     standard_deviation_aligned = standard_deviation.to(
@@ -239,9 +237,7 @@ def denormalize_tensor(
     mean: torch.Tensor,
     standard_deviation: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Convert normalized values back to physical units.
-    """
+    """Convert normalized values to physical units."""
     mean_aligned = mean.to(
         device=normalized_values.device, dtype=normalized_values.dtype
     )
@@ -259,9 +255,7 @@ def denormalize_standard_deviation(
     normalized_standard_deviation: torch.Tensor,
     standard_deviation: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Convert a predictive standard deviation to physical units.
-    """
+    """Convert a predictive standard deviation to physical units."""
     standard_deviation_aligned = standard_deviation.to(
         device=normalized_standard_deviation.device,
         dtype=normalized_standard_deviation.dtype,
@@ -278,6 +272,7 @@ def normalize_changepoint_params(
     normalization: NormalizationStats,
     z_col: int = 2,
 ) -> tuple[float, float]:
+    """Convert changepoint location and width to normalized z coordinates."""
     z_mean = float(normalization.X_mean[z_col].detach().cpu())
     z_std = float(normalization.X_std[z_col].detach().cpu()) + NORMALIZATION_EPS
     return (location_physical - z_mean) / z_std, width_physical / z_std

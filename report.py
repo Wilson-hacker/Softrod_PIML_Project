@@ -19,6 +19,7 @@ def plot_main_experiment(
     data_path: str = "./data/paper_experiment.pkl",
     save_path: str = "./plots/rollout_plts.pdf",
 ) -> None:
+    """Plot the paper rollout comparison from saved results."""
     artifact = load_experiment_artifact(data_path)
 
     plot_multi_profile_rollout_grid_from_artifact(
@@ -32,6 +33,7 @@ def plot_main_experiment(
 def print_aggregate_table(
     results: Mapping[str, Mapping[str, AggregateResult]],
 ) -> None:
+    """Print each model's metric means and standard deviations across seeds."""
     columns = (
         "q_rel_l2",
         "u_rel_l2",
@@ -59,28 +61,11 @@ def print_aggregate_table(
 def load_aggregate_results_from_artifact(
     artifact_path: str | Path,
 ) -> dict[str, dict[str, AggregateResult]]:
-    """
-    Load a saved experiment artifact and reconstruct a results dictionary
-    compatible with print_aggregate_table().
+    """Load aggregate results for print_aggregate_table().
 
-    Only load pickle files that you created or trust, because pickle files
-    can execute arbitrary code during deserialization.
-
-    Parameters
-    ----------
-    artifact_path:
-        Path to the .pkl artifact produced by run_experiment_matrix().
-
-    Returns
-    -------
-    dict[str, dict[str, AggregateResult]]
-        Nested mapping:
-
-            results[experiment_name][model_label] = AggregateResult(...)
-
-        The reconstructed AggregateResult objects contain the stored aggregate
-        metrics and rollout statistics. Their ``runs`` field is empty because
-        individual RunResult objects are not serialized in the artifact.
+    Return results[experiment_name][model_label]. Each AggregateResult has
+    an empty runs tuple because individual RunResult objects are not saved.
+    Only load trusted pickle files; loading them can execute code.
     """
     artifact_path = Path(artifact_path)
 

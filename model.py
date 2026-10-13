@@ -21,11 +21,13 @@ class EnergyGradientGP(gpytorch.models.ExactGP):
         likelihood: gpytorch.likelihoods.GaussianLikelihood,
         model_config: ModelConfig,
     ):
+        """Initialize a zero-mean GP with the configured covariance kernel."""
         super().__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ZeroMean()
         self.covar_module = build_kernel(model_config)
 
     def forward(self, x: torch.Tensor):
+        """Return the GP prior distribution at the supplied inputs."""
         mean = cast(torch.Tensor, self.mean_module(x))
         covariance = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean, covariance)
@@ -40,7 +42,7 @@ def train_gp_model(
     EnergyGradientGP,
     gpytorch.likelihoods.GaussianLikelihood,
 ]:
-    """Train one exact GP with early stopping and best-state restoration."""
+    """Train an exact GP with early stopping and best-checkpoint restoration."""
     if train_x.ndim != 2:
         raise ValueError("train_x must have shape (N, D).")
     if train_y.ndim != 1:
@@ -140,8 +142,7 @@ def train_gp_model(
     if best_model_state is None or best_likelihood_state is None:
         raise RuntimeError("GP training did not produce a valid checkpoint.")
 
-    # Restore the best checkpoint whether training stopped early or reached
-    # the maximum iteration count.
+    # Restore the best recorded checkpoint after training.
     model.load_state_dict(best_model_state)
     likelihood.load_state_dict(best_likelihood_state)
 
