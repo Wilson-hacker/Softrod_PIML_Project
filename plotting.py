@@ -305,7 +305,7 @@ def plot_stiffness_profiles(
     fig, axes = plt.subplots(
         nrows=len(selected_specs),
         ncols=1,
-        figsize=(7.0, 2.5 * len(selected_specs)),
+        figsize=(6.5, 2.0 * len(selected_specs)),
         sharex=True,
         squeeze=False,
     )

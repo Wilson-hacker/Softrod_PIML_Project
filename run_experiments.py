@@ -216,6 +216,14 @@ def train_effort_models(
         kernel_type="rbf",
     )
 
+    # Uncomment to use the reduced input dHdp model
+    # dEdp_config = ModelConfig(
+    #     label=f"{pipeline_config.model.label}-dHdp",
+    #     kernel_type="reduced_input",
+    #     reduced_input_variables=("p",),
+    #     reduced_input_base_kernel="linear",
+    # )
+
     dEdq_config = resolve_model_config(
         pipeline_config.model,
         dataset,
@@ -234,10 +242,6 @@ def train_effort_models(
         model_config=dEdq_config,
         training_config=dEdq_training_config,
     )
-
-    # print("True lengthscale", dEdq_model.covar_module.base_kernel.base_kernel.lengthscale)
-    # print("True output scale", dEdq_model.covar_module.outputscale)
-    # print("True noise", dEdq_likelihood.noise_covar.noise)
 
     models = TrainedModels(
         dEdp_model=dEdp_model,
@@ -272,13 +276,6 @@ def extract_learned_changepoint(
 
     if changepoint_kernel is None:
         return None
-
-    # tqdm.write(
-    #     f"Left lengthscale: {changepoint_kernel.left_kernel.lengthscale.detach().cpu().numpy()}"
-    # )
-    # tqdm.write(
-    #     f"Right lengthscale: {changepoint_kernel.right_kernel.lengthscale.detach().cpu().numpy()}"
-    # )
 
     location_normalized = changepoint_kernel.location
     width_normalized = changepoint_kernel.width
@@ -360,11 +357,6 @@ def run_pipeline(
         evaluation_config=pipeline_config.evaluation,
         seed=seed,
     )
-
-    # tqdm.write(f"u rel. L2 error: {metrics['rollout']['u_rel_l2']:.3e}")
-    # tqdm.write(
-    #     f"Force RMSE: {metrics['calibration']['dHdq_force']['dHdq_force_rmse']:.3e}"
-    # )
 
     if verbose:
         print_metrics_report(metrics)
@@ -935,7 +927,7 @@ def changepoint_robostness_experiments(
 
 
 def compute_main_experiment(
-    save_results_path: str | Path = ("./data/paper_experiment.pkl"),
+    save_results_path: str | Path = "./data/paper_experiment.pkl",
     parallel_config: ParallelConfig | None = None,
 ) -> dict[str, dict[str, AggregateResult]]:
     """Run the paper experiment and save data required for later plots."""

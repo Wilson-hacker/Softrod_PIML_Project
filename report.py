@@ -212,14 +212,14 @@ if __name__ == "__main__":
     results = load_aggregate_results_from_artifact(result_path)
     print_aggregate_table(results)
 
-    # Uncomment if want to generate video / rollout plots.
-
-    # create_rollout_video_from_artifact(
-    #     artifact_path=result_path,
-    #     experiment_name="C2",
-    #     model_label="Baseline",
-    #     save_path="./plots/C2_baseline3.mp4",
-    #     frame_stride=1,
-    #     fps=20,
-    # )
-    # plot_main_experiment(data_path=result_path, save_path="./plots/rollout_experiments.pdf")
+    plot_main_experiment(
+        data_path=result_path, save_path="./plots/rollout_experiments.pdf"
+    )
+    create_rollout_video_from_artifact(
+        artifact_path=result_path,
+        experiment_name="C2",
+        model_label="Baseline",
+        save_path="./plots/C2_baseline3.mp4",
+        frame_stride=1,
+        fps=20,
+    )
