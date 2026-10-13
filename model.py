@@ -145,37 +145,9 @@ def train_gp_model(
     model.load_state_dict(best_model_state)
     likelihood.load_state_dict(best_likelihood_state)
 
-    # kernel = model.covar_module.base_kernel.base_kernel
-    # print(
-    #     "Before:",
-    #     kernel.lengthscale.detach().cpu(),
-    # )
-    # new_lengthscale = kernel.lengthscale.detach().clone()
-    # new_lengthscale[..., 0] = 100.0
-    # kernel.lengthscale = new_lengthscale
-    # print(
-    #     "After:",
-    #     kernel.lengthscale.detach().cpu(),
-    # )
-    #
-    # with torch.no_grad():
-    #     output = model(train_x)
-    #     forced_p_loss = -marginal_log_likelihood(
-    #         output,
-    #         train_y,
-    #     )
-    # print(
-    #     "Loss with large p lengthscale:",
-    #     forced_p_loss.item(),
-    # )
-
     model.eval()
     likelihood.eval()
 
-    # tqdm.write(
-    #     f"Restored best checkpoint from iteration {best_iteration + 1} "
-    #     f"with loss {best_loss:.6f}."
-    # )
     if training_config.verbose:
         print(
             f"Restored best checkpoint from iteration {best_iteration + 1} "
