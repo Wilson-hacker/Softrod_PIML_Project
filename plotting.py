@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pickle
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -481,7 +482,7 @@ def create_rollout_video_from_artifact(
         figure_title.set_text(
             f"{profile['row_label']} — "
             f"{model_label} — "
-            rf"$t={t[step]:.2f}$"
+            rf"$t={float(t[step]):.2f}$"
         )
 
         # Compute the relative strain error for this frame.
@@ -493,7 +494,7 @@ def create_rollout_video_from_artifact(
             error_title.set_text(
                 r"Strain prediction error: "
                 rf"$\varepsilon_q(t)"
-                rf"={q_relative_l2_error:.3e}$"
+                rf"={float(q_relative_l2_error):.3e}$"
             )
         else:
             error_title.set_text(

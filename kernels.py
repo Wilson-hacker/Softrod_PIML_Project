@@ -5,7 +5,6 @@ import torch
 
 from config import (
     INPUT_VARIABLE_INDICES,
-    P_INDEX,
     Q_INDEX,
     Z_INDEX,
     InputVariable,
@@ -22,7 +21,7 @@ class BaselineRBFKernel(gpytorch.kernels.Kernel):
         super().__init__(**kwargs)
         self.base_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=3)
 
-    def forward(self, x1, x2, diag=False, **params):
+    def forward(self, x1, x2, diag=False, last_dim_is_batch=False, **params):
         """Evaluate the covariance on the full input state."""
         return self.base_kernel(x1, x2, diag=diag, **params)
 
@@ -46,7 +45,7 @@ class ReducedInputRBFKernel(gpytorch.kernels.Kernel):
         else:
             self.base_kernel = gpytorch.kernels.LinearKernel(active_dims=active_dims)
 
-    def forward(self, x1, x2, diag=False, **params):
+    def forward(self, x1, x2, diag=False, last_dim_is_batch=False, **params):
         """Evaluate the covariance on the selected input variables."""
         return self.base_kernel(x1, x2, diag=diag, **params)
 
@@ -97,7 +96,7 @@ class StructuralDecoupledKernel(gpytorch.kernels.Kernel):
         else:
             raise ValueError(f"Unknown spatial kernel: {spatial_kernel!r}.")
 
-    def forward(self, x1, x2, diag=False, **params):
+    def forward(self, x1, x2, diag=False, last_dim_is_batch=False, **params):
         """Multiply the strain and spatial covariances."""
         q1 = x1[..., Q_INDEX : Q_INDEX + 1]
         z1 = x1[..., Z_INDEX : Z_INDEX + 1]
@@ -119,7 +118,7 @@ class GibbsStateKernel(gpytorch.kernels.Kernel):
         self.base_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=3)
         self.spatial_kernel = GibbsSpatialKernel(n_freqs=self.n_freqs, **kwargs)
 
-    def forward(self, x1, x2, diag=False, **params):
+    def forward(self, x1, x2, diag=False, last_dim_is_batch=False, **params):
         # Inputs have shape (..., N, 3) with columns (p, q, z).
         """Evaluate the state covariance after warping spatial coordinates."""
         p1, q1, z1 = x1[..., 0:1], x1[..., 1:2], x1[..., 2:3]
@@ -163,7 +162,7 @@ class GibbsSpatialKernel(gpytorch.kernels.Kernel):
         z2_warped = x2 / get_ell(x2)
         return z1_warped, z2_warped
 
-    def forward(self, x1, x2, diag=False, **params):
+    def forward(self, x1, x2, diag=False, last_dim_is_batch=False, **params):
         """Evaluate the RBF covariance on warped spatial coordinates."""
         z1_warped, z2_warped = self.get_warped_z(x1, x2)
         return self.base_kernel(z1_warped, z2_warped, diag=diag, **params)
@@ -227,7 +226,7 @@ class ChangepointSpatialKernel(gpytorch.kernels.Kernel):
         """Evaluate the sigmoid weight for the right-hand kernel."""
         return torch.sigmoid((z - self.location) / self.width)
 
-    def forward(self, x1, x2, diag=False, **params):
+    def forward(self, x1, x2, diag=False, last_dim_is_batch=False, **params):
         """Blend the component covariances using the changepoint gate."""
         s1 = self.gate(x1)
         s2 = self.gate(x2)

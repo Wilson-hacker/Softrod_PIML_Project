@@ -1,6 +1,7 @@
 import pickle
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 
@@ -204,7 +205,7 @@ if __name__ == "__main__":
         artifact_path=result_path,
         experiment_name="C2",
         model_label="Baseline",
-        save_path="./plots/C2_baseline3.mp4",
+        save_path="./plots/C2_baseline.mp4",
         frame_stride=1,
         fps=20,
     )

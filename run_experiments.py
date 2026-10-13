@@ -4,6 +4,7 @@ import multiprocessing as mp
 import os
 import pickle
 import sys
+from collections.abc import Mapping, Sequence
 from concurrent.futures import (
     Future,
     ProcessPoolExecutor,
@@ -11,7 +12,7 @@ from concurrent.futures import (
 )
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import torch

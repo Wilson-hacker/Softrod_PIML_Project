@@ -6,6 +6,7 @@ from typing import cast
 
 import gpytorch
 import torch
+from gpytorch.likelihoods import GaussianLikelihood
 
 from config import ModelConfig, TrainingConfig
 from kernels import StructuralDecoupledKernel, build_kernel
@@ -52,7 +53,8 @@ def train_gp_model(
     if not torch.isfinite(train_x).all() or not torch.isfinite(train_y).all():
         raise ValueError("Training data contains nonfinite values.")
 
-    likelihood = gpytorch.likelihoods.GaussianLikelihood().to(device=train_x.device)
+    likelihood: GaussianLikelihood = GaussianLikelihood()
+    likelihood.to(device=train_x.device)
     model = EnergyGradientGP(
         train_x=train_x,
         train_y=train_y,
